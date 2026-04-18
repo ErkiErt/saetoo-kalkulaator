@@ -1,0 +1,519 @@
+Add-Type -AssemblyName System.Drawing
+
+$base = Split-Path -Parent $MyInvocation.MyCommand.Path
+$outDir = Join-Path $base 'valmis'
+New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+$finalDir = Join-Path $base 'okidoki_koopiad'
+New-Item -ItemType Directory -Path $finalDir -Force | Out-Null
+
+$workspaceRoot = Split-Path -Parent $base
+$desktopRoot = Split-Path -Parent $workspaceRoot
+$laptopDir = Get-ChildItem -LiteralPath $desktopRoot -Directory | Where-Object { $_.Name -like '*pakas' } | Select-Object -First 1
+if (-not $laptopDir) {
+  throw 'Could not locate the laptop source folder on Desktop.'
+}
+
+$src = @{
+  Front = Join-Path $laptopDir.FullName 'fd28fe39-73db-46f4-8e2d-eee7a89b5ed0.jpg'
+  Lid   = Join-Path $laptopDir.FullName '46ac0c81-5486-4d6d-bad5-0192aaaf162b.jpg'
+  Bottom= Join-Path $laptopDir.FullName 'c3066647-b5b1-4340-a122-761fcff46262.jpg'
+  Proof = Join-Path $laptopDir.FullName '76b3bae0-89d0-4ca1-a844-def1b1e64523.jpg'
+  Reflect = Join-Path $laptopDir.FullName 'db082076-0194-4ccf-a99c-f910a0a04ec7.jpg'
+}
+
+function New-RoundedPath([float]$x,[float]$y,[float]$w,[float]$h,[float]$r) {
+  $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $d = $r * 2
+  $path.AddArc($x, $y, $d, $d, 180, 90)
+  $path.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
+  $path.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
+  $path.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
+  $path.CloseFigure()
+  return $path
+}
+
+function Draw-RoundedPanel($g, [float]$x, [float]$y, [float]$w, [float]$h, [float]$r, $fillColor, $borderColor, [float]$borderWidth, [int]$shadowAlpha) {
+  if ($shadowAlpha -gt 0) {
+    $shadowPath = New-RoundedPath ($x + 10) ($y + 14) $w $h $r
+    $shadowBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($shadowAlpha, 0, 0, 0))
+    $g.FillPath($shadowBrush, $shadowPath)
+    $shadowBrush.Dispose()
+    $shadowPath.Dispose()
+  }
+
+  $path = New-RoundedPath $x $y $w $h $r
+  $brush = New-Object System.Drawing.SolidBrush $fillColor
+  $pen = New-Object System.Drawing.Pen $borderColor, $borderWidth
+  $g.FillPath($brush, $path)
+  if ($borderWidth -gt 0) {
+    $g.DrawPath($pen, $path)
+  }
+  $brush.Dispose()
+  $pen.Dispose()
+  return $path
+}
+
+function Draw-ImageContain($g, $img, [float]$x, [float]$y, [float]$w, [float]$h) {
+  $scale = [Math]::Min($w / $img.Width, $h / $img.Height)
+  $dw = [float]($img.Width * $scale)
+  $dh = [float]($img.Height * $scale)
+  $dx = [float]($x + (($w - $dw) / 2))
+  $dy = [float]($y + (($h - $dh) / 2))
+  $g.DrawImage($img, $dx, $dy, $dw, $dh)
+}
+
+function Draw-TextFit($g, [string]$text, [string]$fontName, [float]$startSize, $style, $brush, [float]$x, [float]$y, [float]$maxWidth) {
+  $size = $startSize
+  do {
+    $font = New-Object System.Drawing.Font($fontName, $size, $style)
+    $measure = $g.MeasureString($text, $font)
+    if ($measure.Width -le $maxWidth -or $size -le 14) { break }
+    $font.Dispose()
+    $size -= 2
+  } while ($true)
+  $g.DrawString($text, $font, $brush, $x, $y)
+  return $font
+}
+
+function Save-Jpeg($bmp, [string]$path, [long]$quality) {
+  $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+  $params = New-Object System.Drawing.Imaging.EncoderParameters(1)
+  $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, $quality)
+  $bmp.Save($path, $encoder, $params)
+  $params.Dispose()
+}
+
+function New-SinglePhotoCard([string]$outputPath, $image, [string]$title, [string]$subtitle, $bgStart, $bgEnd, $textBrush, $subBrush) {
+  $bmp = New-Object System.Drawing.Bitmap 1600, 1200
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = 'AntiAlias'
+  $g.InterpolationMode = 'HighQualityBicubic'
+  $g.PixelOffsetMode = 'HighQuality'
+  $g.TextRenderingHint = 'AntiAliasGridFit'
+
+  try {
+    $rect = New-Object System.Drawing.Rectangle 0,0,1600,1200
+    $bg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $bgStart, $bgEnd, 30)
+    $g.FillRectangle($bg, $rect)
+    $bg.Dispose()
+
+    $glow = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(35,255,255,255))
+    $g.FillEllipse($glow, 1080, 60, 280, 280)
+    $g.FillEllipse($glow, 120, 860, 220, 160)
+    $glow.Dispose()
+
+    $card = Draw-RoundedPanel $g 170 90 1260 940 36 ([System.Drawing.Color]::FromArgb(248,255,255,255)) ([System.Drawing.Color]::FromArgb(35,40,50,60)) 1 70
+    $state = $g.Save()
+    $g.SetClip($card)
+    Draw-ImageContain $g $image 220 150 1160 720
+    $g.Restore($state)
+
+    $titleFont = New-Object System.Drawing.Font('Segoe UI Semibold', 34, [System.Drawing.FontStyle]::Bold)
+    $subFont = New-Object System.Drawing.Font('Segoe UI', 20, [System.Drawing.FontStyle]::Regular)
+    $g.DrawString($title, $titleFont, $textBrush, 220, 900)
+    $g.DrawString($subtitle, $subFont, $subBrush, 224, 950)
+
+    $titleFont.Dispose()
+    $subFont.Dispose()
+    $card.Dispose()
+
+    Save-Jpeg $bmp $outputPath 92
+  }
+  finally {
+    $g.Dispose()
+    $bmp.Dispose()
+  }
+}
+
+function New-ShowcaseImage([string]$outputPath, $image, $bgStart, $bgEnd) {
+  $bmp = New-Object System.Drawing.Bitmap 1600, 1200
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = 'AntiAlias'
+  $g.InterpolationMode = 'HighQualityBicubic'
+  $g.PixelOffsetMode = 'HighQuality'
+  $g.TextRenderingHint = 'AntiAliasGridFit'
+
+  try {
+    $rect = New-Object System.Drawing.Rectangle 0,0,1600,1200
+    $bg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $bgStart, $bgEnd, 28)
+    $g.FillRectangle($bg, $rect)
+    $bg.Dispose()
+
+    $glowA = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(40,255,255,255))
+    $glowB = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(24,255,255,255))
+    $g.FillEllipse($glowA, 1080, 70, 260, 260)
+    $g.FillEllipse($glowB, 120, 880, 240, 170)
+    $glowA.Dispose()
+    $glowB.Dispose()
+
+    $shadow = Draw-RoundedPanel $g 175 100 1250 930 42 ([System.Drawing.Color]::FromArgb(248,255,255,255)) ([System.Drawing.Color]::FromArgb(18,40,50,60)) 1 80
+    $state = $g.Save()
+    $g.SetClip($shadow)
+    Draw-ImageContain $g $image 220 140 1160 850
+    $g.Restore($state)
+    $shadow.Dispose()
+
+    Save-Jpeg $bmp $outputPath 92
+  }
+  finally {
+    $g.Dispose()
+    $bmp.Dispose()
+  }
+}
+
+function New-CleanPhoto([string]$outputPath, $image) {
+  $bmp = New-Object System.Drawing.Bitmap 1600, 1200
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = 'HighQuality'
+  $g.InterpolationMode = 'HighQualityBicubic'
+  $g.PixelOffsetMode = 'HighQuality'
+
+  try {
+    $attrs = New-Object System.Drawing.Imaging.ImageAttributes
+    $matrix = New-Object System.Drawing.Imaging.ColorMatrix
+
+    $contrast = 1.07
+    $brightness = 0.03
+    $saturation = 1.04
+    $lumR = 0.3086
+    $lumG = 0.6094
+    $lumB = 0.0820
+
+    $sr = (1 - $saturation) * $lumR
+    $sg = (1 - $saturation) * $lumG
+    $sb = (1 - $saturation) * $lumB
+
+    $matrix.Matrix00 = [float]($contrast * ($sr + $saturation))
+    $matrix.Matrix01 = [float]($contrast * $sg)
+    $matrix.Matrix02 = [float]($contrast * $sb)
+    $matrix.Matrix10 = [float]($contrast * $sr)
+    $matrix.Matrix11 = [float]($contrast * ($sg + $saturation))
+    $matrix.Matrix12 = [float]($contrast * $sb)
+    $matrix.Matrix20 = [float]($contrast * $sr)
+    $matrix.Matrix21 = [float]($contrast * $sg)
+    $matrix.Matrix22 = [float]($contrast * ($sb + $saturation))
+    $matrix.Matrix33 = 1.0
+    $matrix.Matrix40 = [float]$brightness
+    $matrix.Matrix41 = [float]$brightness
+    $matrix.Matrix42 = [float]$brightness
+    $matrix.Matrix44 = 1.0
+
+    $attrs.SetColorMatrix($matrix)
+    $destRect = New-Object System.Drawing.Rectangle 0, 0, 1600, 1200
+    $g.DrawImage($image, $destRect, 0, 0, $image.Width, $image.Height, [System.Drawing.GraphicsUnit]::Pixel, $attrs)
+
+    $attrs.Dispose()
+    Save-Jpeg $bmp $outputPath 94
+  }
+  finally {
+    $g.Dispose()
+    $bmp.Dispose()
+  }
+}
+
+function New-MarketplacePhoto([string]$outputPath, $image, [float]$srcX, [float]$srcY, [float]$srcW, [float]$srcH) {
+  $bmp = New-Object System.Drawing.Bitmap 1600, 1200
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = 'HighQuality'
+  $g.InterpolationMode = 'HighQualityBicubic'
+  $g.PixelOffsetMode = 'HighQuality'
+
+  try {
+    $attrs = New-Object System.Drawing.Imaging.ImageAttributes
+    $matrix = New-Object System.Drawing.Imaging.ColorMatrix
+
+    $contrast = 1.10
+    $brightness = 0.035
+    $saturation = 1.07
+    $lumR = 0.3086
+    $lumG = 0.6094
+    $lumB = 0.0820
+
+    $sr = (1 - $saturation) * $lumR
+    $sg = (1 - $saturation) * $lumG
+    $sb = (1 - $saturation) * $lumB
+
+    $matrix.Matrix00 = [float]($contrast * ($sr + $saturation))
+    $matrix.Matrix01 = [float]($contrast * $sg)
+    $matrix.Matrix02 = [float]($contrast * $sb)
+    $matrix.Matrix10 = [float]($contrast * $sr)
+    $matrix.Matrix11 = [float]($contrast * ($sg + $saturation))
+    $matrix.Matrix12 = [float]($contrast * $sb)
+    $matrix.Matrix20 = [float]($contrast * $sr)
+    $matrix.Matrix21 = [float]($contrast * $sg)
+    $matrix.Matrix22 = [float]($contrast * ($sb + $saturation))
+    $matrix.Matrix33 = 1.0
+    $matrix.Matrix40 = [float]$brightness
+    $matrix.Matrix41 = [float]$brightness
+    $matrix.Matrix42 = [float]$brightness
+    $matrix.Matrix44 = 1.0
+
+    $attrs.SetColorMatrix($matrix)
+    $destRect = New-Object System.Drawing.Rectangle 0, 0, 1600, 1200
+    $g.Clear([System.Drawing.Color]::White)
+    $g.DrawImage($image, $destRect, $srcX, $srcY, $srcW, $srcH, [System.Drawing.GraphicsUnit]::Pixel, $attrs)
+
+    $softBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(18,255,255,255))
+    $g.FillRectangle($softBrush, 0, 0, 1600, 1200)
+    $softBrush.Dispose()
+
+    $attrs.Dispose()
+    Save-Jpeg $bmp $outputPath 94
+  }
+  finally {
+    $g.Dispose()
+    $bmp.Dispose()
+  }
+}
+
+$front = [System.Drawing.Image]::FromFile($src.Front)
+$lid = [System.Drawing.Image]::FromFile($src.Lid)
+$bottom = [System.Drawing.Image]::FromFile($src.Bottom)
+$proof = [System.Drawing.Image]::FromFile($src.Proof)
+$reflect = [System.Drawing.Image]::FromFile($src.Reflect)
+
+try {
+  $whiteText = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(245,245,245))
+  $mutedText = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190,220,225,230))
+  $darkText = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,23,30,38))
+  $grayText = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,92,103,112))
+  $accentA = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,0,226,207))
+  $accentB = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,255,93,177))
+
+  # Hero image
+  $bmp1 = New-Object System.Drawing.Bitmap 1600, 1200
+  $g1 = [System.Drawing.Graphics]::FromImage($bmp1)
+  $g1.SmoothingMode = 'AntiAlias'
+  $g1.InterpolationMode = 'HighQualityBicubic'
+  $g1.PixelOffsetMode = 'HighQuality'
+  $g1.TextRenderingHint = 'AntiAliasGridFit'
+
+  $rect1 = New-Object System.Drawing.Rectangle 0,0,1600,1200
+  $bg1 = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect1, [System.Drawing.Color]::FromArgb(255,10,16,24), [System.Drawing.Color]::FromArgb(255,17,54,65), 35)
+  $g1.FillRectangle($bg1, $rect1)
+  $bg1.Dispose()
+
+  $glow = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(70,0,214,201))
+  $g1.FillEllipse($glow, 980, 120, 420, 420)
+  $g1.FillEllipse($glow, 80, 780, 320, 220)
+  $glow.Dispose()
+
+  $f = Draw-TextFit $g1 'MSI Raider GE67HX' 'Segoe UI Semibold' 54 ([System.Drawing.FontStyle]::Bold) $whiteText 90 90 700
+  $f.Dispose()
+
+  $subFont = New-Object System.Drawing.Font('Segoe UI', 24, [System.Drawing.FontStyle]::Regular)
+  $g1.DrawString('Manguri- ja tooloom uhes masinas', $subFont, $mutedText, 92, 170)
+  $subFont.Dispose()
+
+  $specs = @(
+    'Intel Core i7-12800HX',
+    'RTX 3070 Ti Laptop GPU',
+    '16 GB DDR5 RAM',
+    '1 TB SSD',
+    '15.6" QHD 240 Hz OLED'
+  )
+
+  $y = 260
+  foreach ($spec in $specs) {
+    $pillPath = Draw-RoundedPanel $g1 90 $y 470 64 28 ([System.Drawing.Color]::FromArgb(32,255,255,255)) ([System.Drawing.Color]::FromArgb(65,255,255,255)) 1 0
+    $pillBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,245,245,245))
+    $pillFont = New-Object System.Drawing.Font('Segoe UI Semibold', 21, [System.Drawing.FontStyle]::Regular)
+    $g1.DrawString($spec, $pillFont, $pillBrush, 114, $y + 15)
+    $pillFont.Dispose()
+    $pillBrush.Dispose()
+    $pillPath.Dispose()
+    $y += 82
+  }
+
+  $noteFont = New-Object System.Drawing.Font('Segoe UI', 18, [System.Drawing.FontStyle]::Regular)
+  $g1.DrawString('OLED-ekraan ja RGB valgusriba paistavad sellel mudelil eriti hästi valja.', $noteFont, $mutedText, 92, 708)
+  $g1.DrawString('Esimeseks pildiks sobib see variant vaga hasti.', $noteFont, $mutedText, 92, 740)
+  $noteFont.Dispose()
+
+  $cardPath1 = Draw-RoundedPanel $g1 790 90 700 980 38 ([System.Drawing.Color]::FromArgb(255,18,22,30)) ([System.Drawing.Color]::FromArgb(45,255,255,255)) 1 90
+  $state1 = $g1.Save()
+  $g1.SetClip($cardPath1)
+  Draw-ImageContain $g1 $front 815 115 650 930
+  $g1.Restore($state1)
+  $cardPath1.Dispose()
+
+  $tagPath = Draw-RoundedPanel $g1 1070 950 320 74 24 ([System.Drawing.Color]::FromArgb(235,6,13,20)) ([System.Drawing.Color]::FromArgb(80,255,255,255)) 1 0
+  $tagFont = New-Object System.Drawing.Font('Segoe UI Semibold', 24, [System.Drawing.FontStyle]::Regular)
+  $g1.DrawString('240Hz OLED + RGB', $tagFont, $accentA, 1102, 972)
+  $tagFont.Dispose()
+  $tagPath.Dispose()
+
+  Save-Jpeg $bmp1 (Join-Path $outDir '01_msi_raider_hero.jpg') 92
+  $g1.Dispose()
+  $bmp1.Dispose()
+
+  # Collage
+  $bmp2 = New-Object System.Drawing.Bitmap 1600, 1200
+  $g2 = [System.Drawing.Graphics]::FromImage($bmp2)
+  $g2.SmoothingMode = 'AntiAlias'
+  $g2.InterpolationMode = 'HighQualityBicubic'
+  $g2.PixelOffsetMode = 'HighQuality'
+  $g2.TextRenderingHint = 'AntiAliasGridFit'
+
+  $rect2 = New-Object System.Drawing.Rectangle 0,0,1600,1200
+  $bg2 = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect2, [System.Drawing.Color]::FromArgb(255,246,245,241), [System.Drawing.Color]::FromArgb(255,225,231,233), 90)
+  $g2.FillRectangle($bg2, $rect2)
+  $bg2.Dispose()
+
+  $titleFont = New-Object System.Drawing.Font('Segoe UI Semibold', 42, [System.Drawing.FontStyle]::Bold)
+  $subFont2 = New-Object System.Drawing.Font('Segoe UI', 22, [System.Drawing.FontStyle]::Regular)
+  $g2.DrawString('Pohivaated kuulutuse jaoks', $titleFont, $darkText, 72, 56)
+  $g2.DrawString('Esipilt, kaas ja altvaade uhes puhtas komplektis', $subFont2, $grayText, 76, 118)
+
+  $panels = @(
+    @{X=70; Y=190; W=450; H=900; Img=$front; Label='Eestvaade'; Sub='Hea peapildiks'},
+    @{X=575; Y=190; W=450; H=430; Img=$lid; Label='Suletud kaas'; Sub='Naitab kaane seisukorda'},
+    @{X=1080; Y=190; W=450; H=900; Img=$bottom; Label='Altvaade'; Sub='Oluline ostjale'}
+  )
+
+  foreach ($panel in $panels) {
+    $path = Draw-RoundedPanel $g2 $panel.X $panel.Y $panel.W $panel.H 28 ([System.Drawing.Color]::FromArgb(255,255,255,255)) ([System.Drawing.Color]::FromArgb(35,35,40,50)) 1 55
+    $state = $g2.Save()
+    $g2.SetClip($path)
+    Draw-ImageContain $g2 $panel.Img ($panel.X + 20) ($panel.Y + 20) ($panel.W - 40) ($panel.H - 110)
+    $g2.Restore($state)
+
+    $labelFont = New-Object System.Drawing.Font('Segoe UI Semibold', 24, [System.Drawing.FontStyle]::Regular)
+    $subF = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Regular)
+    $g2.DrawString($panel.Label, $labelFont, $darkText, ($panel.X + 24), ($panel.Y + $panel.H - 78))
+    $g2.DrawString($panel.Sub, $subF, $grayText, ($panel.X + 24), ($panel.Y + $panel.H - 42))
+    $labelFont.Dispose()
+    $subF.Dispose()
+    $path.Dispose()
+  }
+
+  $smallPanel = Draw-RoundedPanel $g2 575 660 450 430 28 ([System.Drawing.Color]::FromArgb(255,255,255,255)) ([System.Drawing.Color]::FromArgb(35,35,40,50)) 1 55
+  $state2 = $g2.Save()
+  $g2.SetClip($smallPanel)
+  Draw-ImageContain $g2 $proof 595 680 410 270
+  $g2.Restore($state2)
+
+  $smallTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 24, [System.Drawing.FontStyle]::Regular)
+  $smallSub = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Regular)
+  $g2.DrawString('Tehniline toestus', $smallTitle, $darkText, 599, 970)
+  $g2.DrawString('MSI Center pilt kinnitab CPU, GPU ja RAM-i', $smallSub, $grayText, 599, 1008)
+  $smallTitle.Dispose()
+  $smallSub.Dispose()
+  $smallPanel.Dispose()
+
+  $titleFont.Dispose()
+  $subFont2.Dispose()
+  Save-Jpeg $bmp2 (Join-Path $outDir '02_msi_raider_vaated.jpg') 92
+  $g2.Dispose()
+  $bmp2.Dispose()
+
+  # Specs image
+  $bmp3 = New-Object System.Drawing.Bitmap 1600, 1200
+  $g3 = [System.Drawing.Graphics]::FromImage($bmp3)
+  $g3.SmoothingMode = 'AntiAlias'
+  $g3.InterpolationMode = 'HighQualityBicubic'
+  $g3.PixelOffsetMode = 'HighQuality'
+  $g3.TextRenderingHint = 'AntiAliasGridFit'
+
+  $rect3 = New-Object System.Drawing.Rectangle 0,0,1600,1200
+  $bg3 = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect3, [System.Drawing.Color]::FromArgb(255,20,22,26), [System.Drawing.Color]::FromArgb(255,46,18,45), 20)
+  $g3.FillRectangle($bg3, $rect3)
+  $bg3.Dispose()
+
+  $leftPath = Draw-RoundedPanel $g3 70 110 700 980 32 ([System.Drawing.Color]::FromArgb(250,245,247,250)) ([System.Drawing.Color]::FromArgb(30,255,255,255)) 1 80
+  $state3 = $g3.Save()
+  $g3.SetClip($leftPath)
+  Draw-ImageContain $g3 $proof 98 138 644 600
+  $g3.Restore($state3)
+  $leftPath.Dispose()
+
+  $proofTitleBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,33,35,39))
+  $proofMuted = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255,110,115,125))
+  $proofTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 28, [System.Drawing.FontStyle]::Bold)
+  $proofSub = New-Object System.Drawing.Font('Segoe UI', 17, [System.Drawing.FontStyle]::Regular)
+  $proofRect = New-Object System.Drawing.RectangleF(102, 820, 610, 180)
+  $g3.DrawString('Lisatav tehniline pilt', $proofTitle, $proofTitleBrush, 102, 772)
+  $g3.DrawString('Soovi korral void selle panna kuulutuse viimaste piltide hulka, et ostja naeks kohe, mis konfiguratsiooniga on tegu.', $proofSub, $proofMuted, $proofRect)
+
+  $headline = New-Object System.Drawing.Font('Segoe UI Semibold', 46, [System.Drawing.FontStyle]::Bold)
+  $body = New-Object System.Drawing.Font('Segoe UI', 22, [System.Drawing.FontStyle]::Regular)
+  $chipFont = New-Object System.Drawing.Font('Segoe UI Semibold', 20, [System.Drawing.FontStyle]::Regular)
+  $bodyRect = New-Object System.Drawing.RectangleF(846, 760, 620, 120)
+
+  $g3.DrawString('Muugi kuulutuse cover', $headline, $whiteText, 845, 110)
+  $g3.DrawString('Valmis tekstiplokid ja pohispetsid', $body, $mutedText, 850, 180)
+
+  $chipY = 280
+  foreach ($chip in @(
+    '12th Gen Intel Core i7-12800HX',
+    'NVIDIA GeForce RTX 3070 Ti Laptop GPU',
+    '16 GB RAM',
+    '872+ GB vaba ruumi nahtav MSI Center pildil',
+    '15.6" OLED ekraan'
+  )) {
+    $chipPath = Draw-RoundedPanel $g3 845 $chipY 650 66 24 ([System.Drawing.Color]::FromArgb(32,255,255,255)) ([System.Drawing.Color]::FromArgb(60,255,255,255)) 1 0
+    $g3.DrawString($chip, $chipFont, $whiteText, 868, $chipY + 18)
+    $chipPath.Dispose()
+    $chipY += 84
+  }
+
+  $g3.DrawString('Soovitus: pane esimeseks pildiks hero-versioon, teiseks vaadete kollaaz ja see pilt kuulutuse loppu.', $body, $mutedText, $bodyRect)
+  $miniTag = Draw-RoundedPanel $g3 845 930 360 84 24 ([System.Drawing.Color]::FromArgb(240,255,255,255)) ([System.Drawing.Color]::FromArgb(0,0,0,0)) 0 0
+  $miniFont = New-Object System.Drawing.Font('Segoe UI Semibold', 24, [System.Drawing.FontStyle]::Bold)
+  $g3.DrawString('Sobib kohe ules laadida', $miniFont, $accentB, 874, 957)
+
+  $proofTitle.Dispose()
+  $proofSub.Dispose()
+  $headline.Dispose()
+  $body.Dispose()
+  $chipFont.Dispose()
+  $miniFont.Dispose()
+  $miniTag.Dispose()
+  $proofTitleBrush.Dispose()
+  $proofMuted.Dispose()
+
+  Save-Jpeg $bmp3 (Join-Path $outDir '03_msi_raider_specid.jpg') 92
+  $g3.Dispose()
+  $bmp3.Dispose()
+
+  New-SinglePhotoCard (Join-Path $outDir '11_eestvaade_yksik.jpg') $front 'MSI Raider GE67HX' 'Eestvaade kuulutuse peapildiks' ([System.Drawing.Color]::FromArgb(255,244,246,248)) ([System.Drawing.Color]::FromArgb(255,223,232,236)) $darkText $grayText
+  New-SinglePhotoCard (Join-Path $outDir '12_kaanepilt_yksik.jpg') $lid 'MSI Raider GE67HX' 'Suletud kaas ja valispind' ([System.Drawing.Color]::FromArgb(255,246,243,239)) ([System.Drawing.Color]::FromArgb(255,231,224,217)) $darkText $grayText
+  New-SinglePhotoCard (Join-Path $outDir '13_altvaade_yksik.jpg') $bottom 'MSI Raider GE67HX' 'Altvaade ja pohja seisukord' ([System.Drawing.Color]::FromArgb(255,240,242,246)) ([System.Drawing.Color]::FromArgb(255,221,228,235)) $darkText $grayText
+  New-SinglePhotoCard (Join-Path $outDir '14_tehniline_toestus_yksik.jpg') $proof 'Tehniline toestus' 'MSI Centeri vaade CPU, GPU ja RAM infoga' ([System.Drawing.Color]::FromArgb(255,245,240,246)) ([System.Drawing.Color]::FromArgb(255,231,221,236)) $darkText $grayText
+
+  New-ShowcaseImage (Join-Path $outDir '21_eestvaade_puhas.jpg') $front ([System.Drawing.Color]::FromArgb(255,235,241,247)) ([System.Drawing.Color]::FromArgb(255,222,229,236))
+  New-ShowcaseImage (Join-Path $outDir '22_kaanepilt_puhas.jpg') $lid ([System.Drawing.Color]::FromArgb(255,245,240,234)) ([System.Drawing.Color]::FromArgb(255,230,224,217))
+  New-ShowcaseImage (Join-Path $outDir '23_altvaade_puhas.jpg') $bottom ([System.Drawing.Color]::FromArgb(255,236,239,246)) ([System.Drawing.Color]::FromArgb(255,224,228,236))
+  New-ShowcaseImage (Join-Path $outDir '24_tehniline_puhas.jpg') $proof ([System.Drawing.Color]::FromArgb(255,241,237,245)) ([System.Drawing.Color]::FromArgb(255,231,224,238))
+
+  New-CleanPhoto (Join-Path $outDir '31_eestvaade_ilma_raamita.jpg') $front
+  New-CleanPhoto (Join-Path $outDir '32_kaanepilt_ilma_raamita.jpg') $lid
+  New-CleanPhoto (Join-Path $outDir '33_altvaade_ilma_raamita.jpg') $bottom
+  New-CleanPhoto (Join-Path $outDir '34_tehniline_ilma_raamita.jpg') $proof
+
+  New-MarketplacePhoto (Join-Path $outDir '41_okidoki_eestvaade.jpg') $front 40 30 520 690
+  New-MarketplacePhoto (Join-Path $outDir '42_okidoki_kaanepilt.jpg') $lid 20 80 760 560
+  New-MarketplacePhoto (Join-Path $outDir '43_okidoki_altvaade.jpg') $bottom 40 70 720 540
+  New-MarketplacePhoto (Join-Path $outDir '44_okidoki_tehniline.jpg') $proof 40 40 720 540
+
+  New-MarketplacePhoto (Join-Path $finalDir '01_peapilt.jpg') $front 35 20 530 705
+  New-MarketplacePhoto (Join-Path $finalDir '02_kaanepilt.jpg') $lid 30 60 740 560
+  New-MarketplacePhoto (Join-Path $finalDir '03_altvaade.jpg') $bottom 30 50 740 560
+  New-MarketplacePhoto (Join-Path $finalDir '04_avatud.jpg') $reflect 50 65 500 675
+
+  Get-ChildItem -LiteralPath $outDir | Select-Object Name, Length, FullName
+  Get-ChildItem -LiteralPath $finalDir | Select-Object Name, Length, FullName
+}
+finally {
+  $whiteText.Dispose()
+  $mutedText.Dispose()
+  $darkText.Dispose()
+  $grayText.Dispose()
+  $accentA.Dispose()
+  $accentB.Dispose()
+  if ($front) { $front.Dispose() }
+  if ($lid) { $lid.Dispose() }
+  if ($bottom) { $bottom.Dispose() }
+  if ($proof) { $proof.Dispose() }
+  if ($reflect) { $reflect.Dispose() }
+}
