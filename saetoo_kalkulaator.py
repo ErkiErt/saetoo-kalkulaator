@@ -1,5 +1,4 @@
-from pathlib import Path
-code = r'''import math
+import math
 import streamlit as st
 import matplotlib.pyplot as plt
 
@@ -436,8 +435,8 @@ def render_result_card(result, best_blade_name):
     m1.metric("Toorikuid", f"{result['sheets_needed']} tk")
     m2.metric("Materjalikulu", f"{result['material_m2']:.2f} m²")
     m3, m4 = st.columns(2)
-    m3.metric("Koguaeg", sec_to_minsec(result['total_sec']))
-    m4.metric("Töörežiim", result['mode'])
+    m3.metric("Koguaeg", sec_to_minsec(result["total_sec"]))
+    m4.metric("Töörežiim", result["mode"])
     st.caption(result["blade_reason"])
     st.table(result_rows(result))
     st.pyplot(draw_scheme(result))
@@ -545,6 +544,3 @@ if results and best_result:
         st.write(f"Viimane uuendus: {LAST_UPDATED}")
 else:
     st.info("Sisesta andmed või vajuta 'Proovi näitega', seejärel 'Arvuta'.")
-'''
-Path('/home/user/saetoo_kalkulaator.py').write_text(code)
-print('saved full code', len(code.splitlines()), 'lines')
