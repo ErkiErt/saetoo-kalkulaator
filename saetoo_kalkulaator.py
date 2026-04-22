@@ -12,17 +12,10 @@ LARGE_BLADE = {"blade": "5.6 mm", "kerf_mm": 5.6, "max_stack_mm": 80.0, "is_defa
 SMALL_BLADE = {"blade": "3.5 mm", "kerf_mm": 3.5, "max_stack_mm": 30.0, "is_default": False}
 BLADES = [LARGE_BLADE, SMALL_BLADE]
 
-STANDARD_SHEETS = {
-    "Tavaplaat": [(1000.0, 2000.0), (1000.0, 3000.0), (1250.0, 3000.0), (1500.0, 3000.0)],
-    "PC": [(2000.0, 3000.0)],
-    "PMMA": [(2000.0, 3000.0)],
-}
+THICKNESS_OPTIONS_MM = [12, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 85]
 
 DEFAULTS = {
-    "material_type": "Tavaplaat",
-    "sheet_index": 0,
     "thickness_mm": 20.0,
-    "use_custom_size": False,
     "raw_width_mm": 1000.0,
     "raw_length_mm": 2000.0,
     "detail_length_mm": 300.0,
@@ -39,10 +32,7 @@ for key, value in DEFAULTS.items():
 
 
 def load_example():
-    st.session_state.material_type = "Tavaplaat"
-    st.session_state.sheet_index = 0
     st.session_state.thickness_mm = 20.0
-    st.session_state.use_custom_size = True
     st.session_state.raw_width_mm = 1005.0
     st.session_state.raw_length_mm = 2005.0
     st.session_state.detail_length_mm = 300.0
@@ -116,6 +106,8 @@ def validate_common(thickness_mm, raw_length_mm, raw_width_mm, detail_length_mm,
         return "Detaili mõõdud peavad olema suuremad kui 0 mm."
     if detail_count < 1:
         return "Detailide arv peab olema vähemalt 1."
+    if thickness_mm not in THICKNESS_OPTIONS_MM:
+        return "Lubatud paksused on 12, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75 ja 85 mm."
     if get_sec_per_meter(thickness_mm) is None:
         return "Paksuse vahemik peab olema 1 kuni 90 mm."
     return None
@@ -368,34 +360,54 @@ def add_blade_reasons(results, best):
 
 
 def draw_scheme(result):
-    fig, ax = plt.subplots(figsize=(7, 6))
-    scale = 10
-    ax.set_xlim(0, result["raw_width_mm"] / scale)
-    ax.set_ylim(0, result["raw_length_mm"] / scale)
-    ax.set_aspect("equal")
+    raw_w = result["raw_width_mm"]
+    raw_l = result["raw_length_mm"]
+    fig_ratio = max(1.0, raw_l / max(raw_w, 1))
+    fig, ax = plt.subplots(figsize=(7, min(12, 5 + fig_ratio * 2.2)))
+
+    pad_x = raw_w * 0.05
+    pad_y = raw_l * 0.05
+    ax.set_xlim(0, raw_w + pad_x)
+    ax.set_ylim(raw_l + pad_y, 0)
+    ax.set_aspect("equal", adjustable="box")
     ax.set_title(f"{result['blade']['blade']} | {result['mode']} | Pööratud: {'Jah' if result.get('orientation_rotated') else 'Ei'}")
     ax.set_xlabel("Laius (mm)")
     ax.set_ylabel("Pikkus (mm)")
-    ax.add_patch(plt.Rectangle((0, 0), result["raw_width_mm"] / scale, result["raw_length_mm"] / scale, facecolor="#dddddd", edgecolor="black", linewidth=2))
 
-    piece_w = result["detail_width_mm"] / scale
-    piece_h = result["detail_length_mm"] / scale
-    kerf = result["blade"]["kerf_mm"] / scale
+    ax.add_patch(plt.Rectangle((0, 0), raw_w, raw_l, facecolor="#dddddd", edgecolor="black", linewidth=2))
 
-    max_x = min(result.get("across", result.get("pieces_per_sheet", 0)), 12)
-    max_y = min(result.get("along", 1), 12)
-    for i in range(max_x):
-        for j in range(max_y):
+    piece_w = result["detail_width_mm"]
+    piece_h = result["detail_length_mm"]
+    kerf = result["blade"]["kerf_mm"]
+    across = result.get("across", 1)
+    along = result.get("along", 1)
+
+    shown_x = min(across, 12)
+    shown_y = min(along, 12)
+
+    for i in range(shown_x):
+        for j in range(shown_y):
             x = i * (piece_w + kerf)
             y = j * (piece_h + kerf)
-            if x + piece_w <= result["raw_width_mm"] / scale and y + piece_h <= result["raw_length_mm"] / scale:
-                ax.add_patch(plt.Rectangle((x, y), piece_w, piece_h, facecolor="#b7d7ff", edgecolor="#1f4e79", alpha=0.85))
+            if x + piece_w <= raw_w and y + piece_h <= raw_l:
+                ax.add_patch(plt.Rectangle((x, y), piece_w, piece_h, facecolor="#b7d7ff", edgecolor="#1f4e79", alpha=0.9))
+
+    used_w = result.get("used_width_mm", 0)
+    used_l = result.get("used_length_mm", 0)
 
     if result.get("waste_width_mm", 0) > 0:
-        xw = result.get("used_width_mm", 0) / scale
-        ax.add_patch(plt.Rectangle((xw, 0), result["waste_width_mm"] / scale, result["raw_length_mm"] / scale, facecolor="#fff2b2", edgecolor="#c49b00", alpha=0.7))
+        ax.add_patch(plt.Rectangle((used_w, 0), result["waste_width_mm"], raw_l, facecolor="#fff2b2", edgecolor="#c49b00", alpha=0.7))
 
-    ax.grid(True, alpha=0.25)
+    if result.get("waste_length_mm", 0) > 0 and used_w > 0:
+        ax.add_patch(plt.Rectangle((0, used_l), used_w, result["waste_length_mm"], facecolor="#ffe0b2", edgecolor="#c77700", alpha=0.65))
+
+    ax.text(raw_w / 2, -raw_l * 0.03, f"Toorik: {fmt(raw_w)} x {fmt(raw_l)} mm", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.text(min(raw_w * 0.03, 30), min(raw_l * 0.06, 120), f"Detail: {fmt(piece_w)} x {fmt(piece_h)} mm", ha="left", va="top", fontsize=9)
+
+    if across > shown_x or along > shown_y:
+        ax.text(raw_w * 0.02, raw_l * 0.98, f"Skeemil kuvatakse kuni 12 x 12 detaili, tegelik paigutus: {across} x {along}", ha="left", va="top", fontsize=8, color="#444444")
+
+    ax.grid(True, alpha=0.2)
     plt.tight_layout()
     return fig
 
@@ -462,24 +474,11 @@ with h2:
 with st.form("calc_form"):
     c1, c2, c3 = st.columns(3)
     with c1:
-        material_type = st.selectbox("Materjali tüüp", ["Tavaplaat", "PC", "PMMA"], index=["Tavaplaat", "PC", "PMMA"].index(st.session_state.material_type))
+        thickness_mm = st.selectbox("Paksus mm", THICKNESS_OPTIONS_MM, index=THICKNESS_OPTIONS_MM.index(int(st.session_state.thickness_mm)) if int(st.session_state.thickness_mm) in THICKNESS_OPTIONS_MM else 2)
     with c2:
-        standard_options = STANDARD_SHEETS[material_type]
-        safe_index = min(st.session_state.sheet_index, len(standard_options) - 1)
-        standard_choice = st.selectbox("Standard täisplaadi mõõt", standard_options, index=safe_index, format_func=lambda x: f"{int(x[0])} x {int(x[1])} mm")
+        raw_width_mm = st.number_input("Tooriku laius mm", min_value=1.0, max_value=MAX_WIDTH_MM, value=float(st.session_state.raw_width_mm), step=1.0)
     with c3:
-        thickness_mm = st.number_input("Paksus mm", min_value=1.0, max_value=90.0, value=float(st.session_state.thickness_mm), step=1.0)
-
-    use_custom_size = st.checkbox("Sisestan mõõdud käsitsi", value=st.session_state.use_custom_size)
-    d1, d2 = st.columns(2)
-    with d1:
-        raw_width_mm = st.number_input("Tooriku laius mm", min_value=1.0, max_value=MAX_WIDTH_MM, value=float(st.session_state.raw_width_mm if use_custom_size else standard_choice[0]), step=1.0, disabled=not use_custom_size)
-    with d2:
-        raw_length_mm = st.number_input("Tooriku pikkus mm", min_value=1.0, max_value=MAX_LENGTH_MM, value=float(st.session_state.raw_length_mm if use_custom_size else standard_choice[1]), step=1.0, disabled=not use_custom_size)
-
-    if not use_custom_size:
-        raw_width_mm = float(standard_choice[0])
-        raw_length_mm = float(standard_choice[1])
+        raw_length_mm = st.number_input("Tooriku pikkus mm", min_value=1.0, max_value=MAX_LENGTH_MM, value=float(st.session_state.raw_length_mm), step=1.0)
 
     x1, x2 = st.columns(2)
     with x1:
@@ -492,10 +491,7 @@ with st.form("calc_form"):
     submitted = st.form_submit_button("Arvuta", use_container_width=True)
 
 if submitted:
-    st.session_state.material_type = material_type
-    st.session_state.sheet_index = standard_options.index(standard_choice)
-    st.session_state.thickness_mm = thickness_mm
-    st.session_state.use_custom_size = use_custom_size
+    st.session_state.thickness_mm = float(thickness_mm)
     st.session_state.raw_width_mm = raw_width_mm
     st.session_state.raw_length_mm = raw_length_mm
     st.session_state.detail_width_mm = detail_width_mm
@@ -503,12 +499,12 @@ if submitted:
     st.session_state.detail_count = int(detail_count)
     st.session_state.show_details = show_details
 
-    error = validate_common(thickness_mm, raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count))
+    error = validate_common(float(thickness_mm), raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count))
     if error:
         st.error(error)
         st.stop()
 
-    results = [make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count)) for blade in BLADES]
+    results = [make_result(blade, float(thickness_mm), raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count)) for blade in BLADES]
     best_result = choose_best_result(results)
     if best_result is None:
         st.error("Detail ei mahu antud toorikusse kummagi kettaga.")
