@@ -4,9 +4,9 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Saetöö kalkulaator", page_icon="🪚", layout="wide")
 
-MAX_LENGTH_MM = 3050.0
+MAX_LENGTH_MM = 3000.0
 MAX_WIDTH_MM = 2050.0
-LAST_UPDATED = "2026-04-22"
+LAST_UPDATED = "2026-04-23"
 
 LARGE_BLADE = {"blade": "5.6 mm", "kerf_mm": 5.6, "max_stack_mm": 80.0, "is_default": True}
 SMALL_BLADE = {"blade": "3.5 mm", "kerf_mm": 3.5, "max_stack_mm": 30.0, "is_default": False}
@@ -15,7 +15,7 @@ BLADES = [LARGE_BLADE, SMALL_BLADE]
 THICKNESS_OPTIONS_MM = list(range(1, 13)) + [15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 85]
 
 DEFAULTS = {
-    "thickness_mm": 20.0,
+    "thickness_mm": 20,
     "raw_width_mm": 1000.0,
     "raw_length_mm": 2000.0,
     "detail_length_mm": 300.0,
@@ -29,16 +29,6 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
-
-
-def load_example():
-    st.session_state.thickness_mm = 20.0
-    st.session_state.raw_width_mm = 1005.0
-    st.session_state.raw_length_mm = 2005.0
-    st.session_state.detail_length_mm = 300.0
-    st.session_state.detail_width_mm = 95.0
-    st.session_state.detail_count = 20
-    st.session_state.show_details = True
 
 
 def get_sec_per_meter(thickness_mm):
@@ -71,12 +61,8 @@ def fmt(v):
     return str(round(v, 2))
 
 
-def material_area_m2(length_mm, width_mm, sheet_count, kerf_area_mm2=0):
-    return 0 if sheet_count <= 0 else ((length_mm * width_mm * sheet_count) + kerf_area_mm2) / 1_000_000.0
-
-
 def single_sheet_area_m2(length_mm, width_mm):
-    return (length_mm / 1000.0) * (width_mm / 1000.0)
+    return (length_mm * width_mm) / 1_000_000.0
 
 
 def max_pieces_in_length(total_len_mm, piece_len_mm, kerf_mm):
@@ -150,7 +136,8 @@ def choose_mode(raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, 
 
 
 def build_cut_scheme(lines):
-    return "\n".join([f"{i}. {line}" for i, line in enumerate(lines, start=1)])
+    return "
+".join([f"{i}. {line}" for i, line in enumerate(lines, start=1)])
 
 
 def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, detail_count):
@@ -174,29 +161,29 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
     if mode == "Ribastamine":
         sheets_needed = math.ceil(detail_count / across)
         used_width = used_size_mm(across, d_wid, kerf)
-        waste_width = raw_width_mm - used_width
+        waste_width = max(0, raw_width_mm - used_width)
         max_stack_sheets = max(1, int(blade["max_stack_mm"] // thickness_mm))
         stack_runs = math.ceil(sheets_needed / max_stack_sheets)
         cut_cycles = stack_runs * max(0, across - 1)
         cutting_time_sec = (raw_length_mm / 1000.0) * sec_per_m * 2 * cut_cycles
-        kerf_area_mm2 = max(0, across - 1) * raw_length_mm * kerf
-        actual_material_m2 = material_area_m2(raw_length_mm, raw_width_mm, sheets_needed, kerf_area_mm2)
+        kerf_area_mm2 = max(0, across - 1) * raw_length_mm * kerf * sheets_needed
+        used_area_mm2 = raw_length_mm * used_width * sheets_needed
+        actual_material_m2 = (used_area_mm2 + kerf_area_mm2) / 1_000_000.0
         total_sec = cutting_time_sec + setup_sec + blade_setup_sec
-        explanation = f"Süsteem valis ribastamise, sest detail mahub laiusesse {across} ribana ja pikkusesse tükeldust ei ole vaja. Materjalikulu arvestab ka saetee: {actual_material_m2:.2f} m²."
+        explanation = f"Süsteem valis ribastamise, sest detail mahub laiusesse {across} ribana ja pikkusesse tükeldust ei ole vaja. Materjalikulu arvestab ainult detailide tegemiseks kulunud materjali koos saeteega: {actual_material_m2:.2f} m²."
         calc_steps = [
             f"Automaatne töörežiim: {mode}.",
             f"Orientatsioon {'pööratud' if rotated else 'algne'}.",
             f"Ribasid ühest plaadist = {across}.",
             f"Plaate vaja = lae({detail_count} / {across}) = {sheets_needed}.",
-            f"Ribastamise seeriaid = {stack_runs}.",
-            f"Materjalikulu sisaldab saeteed.",
+            f"Materjalikulu arvestab ainult kasutatud osa ja saeteed.",
         ]
         scheme = build_cut_scheme([
             f"Võta {sheets_needed} täisplaati mõõdus {fmt(raw_width_mm)} x {fmt(raw_length_mm)} mm.",
             f"Lao korraga virna kuni {max_stack_sheets} plaati, selle töö jaoks on vaja {stack_runs} ribastamise seeriat.",
             f"Lõika igast virnast välja {across} täispikka riba laiusega {fmt(d_wid)} mm.",
             f"Ribalõikeid ühes seerias on {max(0, across - 1)}.",
-            f"Jääk ühe plaadi laiuses on {fmt(waste_width)} mm.",
+            f"Alles jääv kasutamata täisriba ühe plaadi kohta on {fmt(waste_width)} mm.",
         ])
         return {
             "mode": mode,
@@ -210,7 +197,9 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
             "pieces_per_sheet": across,
             "sheets_needed": sheets_needed,
             "used_width_mm": used_width,
+            "used_length_mm": raw_length_mm,
             "waste_width_mm": waste_width,
+            "waste_length_mm": 0.0,
             "cutting_time_sec": cutting_time_sec,
             "setup_sec": setup_sec,
             "blade_setup_sec": blade_setup_sec,
@@ -223,13 +212,17 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
             "explanation": explanation,
             "across": across,
             "along": 1,
+            "kerf_area_m2": kerf_area_mm2 / 1_000_000.0,
+            "used_area_m2": used_area_mm2 / 1_000_000.0,
+            "valuable_remainder_m2": (waste_width * raw_length_mm * sheets_needed) / 1_000_000.0,
+            "waste_value_penalty": sheets_needed * 1000 + waste_width,
         }
 
     sheets_needed = math.ceil(detail_count / pieces_per_sheet)
     used_width = used_size_mm(across, d_wid, kerf)
     used_length = used_size_mm(along, d_len, kerf)
-    waste_width = raw_width_mm - used_width
-    waste_length = raw_length_mm - used_length
+    waste_width = max(0, raw_width_mm - used_width)
+    waste_length = max(0, raw_length_mm - used_length)
 
     if mode == "Ribastamine + tükeldamine":
         max_stack_sheets = max(1, int(blade["max_stack_mm"] // thickness_mm))
@@ -241,10 +234,14 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
         crosscut_cycles = crosscut_runs * max(0, along - 1)
         strip_time_sec = (raw_length_mm / 1000.0) * sec_per_m * 2 * strip_cut_cycles
         crosscut_time_sec = (used_width / 1000.0) * sec_per_m * 2 * crosscut_cycles
-        kerf_area_mm2 = max(0, across - 1) * raw_length_mm * kerf + max(0, along - 1) * (used_width) * kerf
-        actual_material_m2 = material_area_m2(raw_length_mm, raw_width_mm, sheets_needed, kerf_area_mm2)
+        kerf_area_mm2 = (
+            max(0, across - 1) * raw_length_mm * kerf * sheets_needed
+            + max(0, along - 1) * used_width * kerf * sheets_needed
+        )
+        used_area_mm2 = used_width * used_length * sheets_needed
+        actual_material_m2 = (used_area_mm2 + kerf_area_mm2) / 1_000_000.0
         total_sec = strip_time_sec + crosscut_time_sec + setup_sec + blade_setup_sec
-        explanation = f"Süsteem valis ribastamise + tükeldamise, sest detailist saab teha esmalt ribad ja siis lõigata need pikkusesse. Materjalikulu sisaldab saeteed ja on {actual_material_m2:.2f} m²."
+        explanation = f"Süsteem valis ribastamise + tükeldamise, sest detailist saab teha esmalt ribad ja siis lõigata need pikkusesse. Materjalikulu arvestab ainult detailide tegemiseks kulunud materjali koos saeteega: {actual_material_m2:.2f} m²."
         calc_steps = [
             f"Automaatne töörežiim: {mode}.",
             f"Orientatsioon {'pööratud' if rotated else 'algne'}.",
@@ -252,7 +249,7 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
             f"Tükke ühest ribast = {along}.",
             f"Ühest toorikust tuleb {pieces_per_sheet} detaili.",
             f"Toorikuid vaja = lae({detail_count} / {pieces_per_sheet}) = {sheets_needed}.",
-            f"Materjalikulu sisaldab saeteed.",
+            f"Materjalikulu arvestab ainult kasutatud osa ja saeteed.",
         ]
         scheme = build_cut_scheme([
             f"Võta {sheets_needed} täisplaati mõõdus {fmt(raw_width_mm)} x {fmt(raw_length_mm)} mm.",
@@ -260,7 +257,7 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
             f"Ribasta igast plaadist {across} riba laiusega {fmt(d_wid)} mm.",
             f"Seejärel tükelda ribad detailipikkuseks {fmt(d_len)} mm, ühest ribast saab {along} detaili.",
             f"Kokku saad ühest toorikust {pieces_per_sheet} detaili.",
-            f"Jääk ühe tooriku kohta on {fmt(waste_width)} mm laiuses ja {fmt(waste_length)} mm pikkuses.",
+            f"Alles jääb kasutamata {fmt(waste_width)} mm laiuses ja {fmt(waste_length)} mm pikkuses.",
         ])
         return {
             "mode": mode,
@@ -289,29 +286,37 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
             "explanation": explanation,
             "across": across,
             "along": along,
+            "kerf_area_m2": kerf_area_mm2 / 1_000_000.0,
+            "used_area_m2": used_area_mm2 / 1_000_000.0,
+            "valuable_remainder_m2": ((waste_width * raw_length_mm) + (used_width * waste_length)) * sheets_needed / 1_000_000.0,
+            "waste_value_penalty": sheets_needed * 1000 + waste_width + waste_length,
         }
 
     total_cut_cycles = (max(0, across - 1) + across * max(0, along - 1)) * sheets_needed
     cutting_time_sec = (raw_length_mm / 1000.0) * sec_per_m * 2 * total_cut_cycles
-    kerf_area_mm2 = (max(0, across - 1) * raw_length_mm * kerf) + (max(0, along - 1) * (across * d_wid) * kerf)
-    actual_material_m2 = material_area_m2(raw_length_mm, raw_width_mm, sheets_needed, kerf_area_mm2)
+    kerf_area_mm2 = (
+        max(0, across - 1) * raw_length_mm * kerf * sheets_needed
+        + max(0, along - 1) * (across * d_wid) * kerf * sheets_needed
+    )
+    used_area_mm2 = used_width * used_length * sheets_needed
+    actual_material_m2 = (used_area_mm2 + kerf_area_mm2) / 1_000_000.0
     total_sec = cutting_time_sec + setup_sec + blade_setup_sec
-    explanation = f"Süsteem valis tooriku lõikuse, sest detaili paigutus nõuab jaotust nii laiusesse kui pikkusesse otse plaadist. Materjalikulu sisaldab saeteed ja on {actual_material_m2:.2f} m²."
+    explanation = f"Süsteem valis tooriku lõikuse, sest detaili paigutus nõuab jaotust nii laiusesse kui pikkusesse otse plaadist. Materjalikulu arvestab ainult detailide tegemiseks kulunud materjali koos saeteega: {actual_material_m2:.2f} m²."
     calc_steps = [
-        f"Automaatne töörežiim: Tooriku lõikus.",
+        "Automaatne töörežiim: Tooriku lõikus.",
         f"Orientatsioon {'pööratud' if rotated else 'algne'}.",
         f"Laiuses mahub {across} detaili.",
         f"Pikkuses mahub {along} detaili.",
         f"Ühest toorikust tuleb {pieces_per_sheet} detaili.",
         f"Toorikuid vaja = lae({detail_count} / {pieces_per_sheet}) = {sheets_needed}.",
-        f"Materjalikulu sisaldab saeteed.",
+        "Materjalikulu arvestab ainult kasutatud osa ja saeteed.",
     ]
     scheme = build_cut_scheme([
         f"Võta {sheets_needed} toorikut mõõdus {fmt(raw_width_mm)} x {fmt(raw_length_mm)} mm.",
         f"Lõika kõigepealt laiusesse {across} rida detaililaiusega {fmt(d_wid)} mm.",
         f"Seejärel lõika pikkusesse {along} jaotust detailipikkusega {fmt(d_len)} mm.",
         f"Ühest toorikust saad kokku {pieces_per_sheet} detaili.",
-        f"Jääk ühe tooriku kohta on {fmt(waste_width)} mm laiuses ja {fmt(waste_length)} mm pikkuses.",
+        f"Alles jääb kasutamata {fmt(waste_width)} mm laiuses ja {fmt(waste_length)} mm pikkuses.",
     ])
     return {
         "mode": "Tooriku lõikus",
@@ -340,6 +345,10 @@ def make_result(blade, thickness_mm, raw_length_mm, raw_width_mm, detail_length_
         "explanation": explanation,
         "across": across,
         "along": along,
+        "kerf_area_m2": kerf_area_mm2 / 1_000_000.0,
+        "used_area_m2": used_area_mm2 / 1_000_000.0,
+        "valuable_remainder_m2": ((waste_width * raw_length_mm) + (used_width * waste_length)) * sheets_needed / 1_000_000.0,
+        "waste_value_penalty": sheets_needed * 1000 + waste_width + waste_length,
     }
 
 
@@ -350,8 +359,9 @@ def choose_best_result(results):
     return min(
         valid,
         key=lambda r: (
-            r["sheets_needed"],
             r["material_m2"],
+            r["sheets_needed"],
+            r["waste_value_penalty"],
             r["total_sec"],
             0 if r["blade"]["is_default"] else 1,
         ),
@@ -364,14 +374,15 @@ def add_blade_reasons(results, best):
             continue
         if r is best:
             r["blade_reason"] = (
-                f"Soovitatud variant, sest see annab {r['sheets_needed']} toorikut ja väikseima kogukulu. "
-                f"Materjalikulu koos saeteega on {r['material_m2']:.2f} m² ning koguaeg {sec_to_minsec(r['total_sec'])}."
+                f"Soovitatud variant, sest see kulutab detailide tegemiseks kõige vähem materjali, "
+                f"hoiab täisplaadi väärtust paremini alles ja vähendab jääkide teket. "
+                f"Materjalikulu koos saeteega on {r['material_m2']:.2f} m², toorikuid kulub {r['sheets_needed']} tk ja koguaeg on {sec_to_minsec(r['total_sec'])}."
             )
         else:
-            other = "väiksem ketas" if r["blade"]["blade"] == "3.5 mm" else "5.6 mm ketas"
+            other = "3.5 mm ketas" if r["blade"]["blade"] == "5.6 mm" else "5.6 mm ketas"
             r["blade_reason"] = (
-                f"Alternatiiv. See variant kasutab {other}, annab {r['sheets_needed']} toorikut, "
-                f"{r['material_m2']:.2f} m² materjali ja {sec_to_minsec(r['total_sec'])}."
+                f"Alternatiiv. See variant kasutab {other}, kuid jätab väiksema väärtusega jääke või kulutab rohkem täisplaati. "
+                f"Materjalikulu on {r['material_m2']:.2f} m², toorikuid {r['sheets_needed']} tk ja aeg {sec_to_minsec(r['total_sec'])}."
             )
 
 
@@ -381,8 +392,8 @@ def draw_scheme(result):
     fig_ratio = max(1.0, raw_l / max(raw_w, 1))
     fig, ax = plt.subplots(figsize=(7, min(12, 5 + fig_ratio * 2.2)))
 
-    pad_x = raw_w * 0.05
-    pad_y = raw_l * 0.05
+    pad_x = raw_w * 0.08
+    pad_y = raw_l * 0.08
     ax.set_xlim(0, raw_w + pad_x)
     ax.set_ylim(raw_l + pad_y, 0)
     ax.set_aspect("equal", adjustable="box")
@@ -417,12 +428,12 @@ def draw_scheme(result):
     if result.get("waste_length_mm", 0) > 0 and used_w > 0:
         ax.add_patch(plt.Rectangle((0, used_l), used_w, result["waste_length_mm"], facecolor="#ffe0b2", edgecolor="#c77700", alpha=0.65))
 
-    ax.text(raw_w / 2, -raw_l * 0.03, f"Toorik: {fmt(raw_w)} x {fmt(raw_l)} mm", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.text(raw_w / 2, -raw_l * 0.04, f"Toorik: {fmt(raw_w)} x {fmt(raw_l)} mm", ha="center", va="bottom", fontsize=10, fontweight="bold")
     ax.text(min(raw_w * 0.03, 30), min(raw_l * 0.06, 120), f"Detail: {fmt(piece_w)} x {fmt(piece_h)} mm", ha="left", va="top", fontsize=9)
     ax.annotate("", xy=(raw_w, raw_l + pad_y * 0.3), xytext=(0, raw_l + pad_y * 0.3), arrowprops=dict(arrowstyle="<->", lw=1.2, color="#444"))
-    ax.text(raw_w / 2, raw_l + pad_y * 0.32, f"{fmt(raw_w)} mm", ha="center", va="bottom", fontsize=9)
+    ax.text(raw_w / 2, raw_l + pad_y * 0.34, f"{fmt(raw_w)} mm", ha="center", va="bottom", fontsize=9)
     ax.annotate("", xy=(raw_w + pad_x * 0.3, raw_l), xytext=(raw_w + pad_x * 0.3, 0), arrowprops=dict(arrowstyle="<->", lw=1.2, color="#444"))
-    ax.text(raw_w + pad_x * 0.32, raw_l / 2, f"{fmt(raw_l)} mm", ha="left", va="center", rotation=90, fontsize=9)
+    ax.text(raw_w + pad_x * 0.34, raw_l / 2, f"{fmt(raw_l)} mm", ha="left", va="center", rotation=90, fontsize=9)
 
     if across > shown_x or along > shown_y:
         ax.text(raw_w * 0.02, raw_l * 0.98, f"Skeemil kuvatakse kuni 12 x 12 detaili, tegelik paigutus: {across} x {along}", ha="left", va="top", fontsize=8, color="#444444")
@@ -439,7 +450,10 @@ def result_rows(result):
         ["Detail", f"{fmt(result['detail_width_mm'])} x {fmt(result['detail_length_mm'])} mm"],
         ["Tellitud kogus", f"{result['detail_count']} tk"],
         ["Toorikuid vaja", f"{result['sheets_needed']} tk"],
-        ["Materjalikulu", f"{result['material_m2']:.2f} m²"],
+        ["Kulunud materjal", f"{result['material_m2']:.2f} m²"],
+        ["Detailide ala", f"{result['used_area_m2']:.2f} m²"],
+        ["Saetee kulu", f"{result['kerf_area_m2']:.2f} m²"],
+        ["Alles jääv väärtuslik jääk", f"{result['valuable_remainder_m2']:.2f} m²"],
         ["Koguaeg", sec_to_minsec(result["total_sec"])],
         ["Lõikeaeg", sec_to_minsec(result["cutting_time_sec"])],
         ["Setup aeg", sec_to_minsec(result["setup_sec"] + result["blade_setup_sec"])],
@@ -465,7 +479,7 @@ def render_result_card(result, best_blade_name):
     st.subheader(result["blade"]["blade"])
     m1, m2 = st.columns(2)
     m1.metric("Toorikuid", f"{result['sheets_needed']} tk")
-    m2.metric("Materjalikulu", f"{result['material_m2']:.2f} m²")
+    m2.metric("Kulunud materjal", f"{result['material_m2']:.2f} m²")
     m3, m4 = st.columns(2)
     m3.metric("Koguaeg", sec_to_minsec(result["total_sec"]))
     m4.metric("Töörežiim", result["mode"])
@@ -483,18 +497,10 @@ def render_result_card(result, best_blade_name):
 st.title("🪚 Saetöö kalkulaator")
 st.caption("Sisesta mida ja millest lõigata vaja — süsteem tuvastab töörežiimi automaatselt ja näitab mõlemad kettad kõrvuti.")
 
-h1, h2 = st.columns([3, 1])
-with h1:
-    st.markdown("Arvutus käib alles nupust **Arvuta**. Töörežiim valitakse automaatselt detaili ja tooriku mõõtude järgi.")
-with h2:
-    if st.button("Proovi näitega", use_container_width=True):
-        load_example()
-        st.rerun()
-
 with st.form("calc_form"):
     c1, c2, c3 = st.columns(3)
     with c1:
-        thickness_mm = st.selectbox("Paksus mm", THICKNESS_OPTIONS_MM, index=THICKNESS_OPTIONS_MM.index(int(st.session_state.thickness_mm)) if int(st.session_state.thickness_mm) in THICKNESS_OPTIONS_MM else 2)
+        thickness_mm = st.selectbox("Paksus mm", THICKNESS_OPTIONS_MM, index=THICKNESS_OPTIONS_MM.index(int(st.session_state.thickness_mm)) if int(st.session_state.thickness_mm) in THICKNESS_OPTIONS_MM else 19)
     with c2:
         raw_width_mm = st.number_input("Tooriku laius mm", min_value=1.0, max_value=MAX_WIDTH_MM, value=float(st.session_state.raw_width_mm), step=1.0)
     with c3:
@@ -511,7 +517,7 @@ with st.form("calc_form"):
     submitted = st.form_submit_button("Arvuta", use_container_width=True)
 
 if submitted:
-    st.session_state.thickness_mm = float(thickness_mm)
+    st.session_state.thickness_mm = int(thickness_mm)
     st.session_state.raw_width_mm = raw_width_mm
     st.session_state.raw_length_mm = raw_length_mm
     st.session_state.detail_width_mm = detail_width_mm
@@ -519,12 +525,12 @@ if submitted:
     st.session_state.detail_count = int(detail_count)
     st.session_state.show_details = show_details
 
-    error = validate_common(float(thickness_mm), raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count))
+    error = validate_common(int(thickness_mm), raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count))
     if error:
         st.error(error)
         st.stop()
 
-    results = [make_result(blade, float(thickness_mm), raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count)) for blade in BLADES]
+    results = [make_result(blade, int(thickness_mm), raw_length_mm, raw_width_mm, detail_length_mm, detail_width_mm, int(detail_count)) for blade in BLADES]
     best_result = choose_best_result(results)
     if best_result is None:
         st.error("Detail ei mahu antud toorikusse kummagi kettaga.")
@@ -540,7 +546,7 @@ if results and best_result:
     st.subheader("Soovitus")
     st.success(
         f"Süsteemi soovitus on {best_result['blade']['blade']} | töörežiim: {best_result['mode']} | "
-        f"toorikuid: {best_result['sheets_needed']} tk | materjalikulu: {best_result['material_m2']:.2f} m² | "
+        f"toorikuid: {best_result['sheets_needed']} tk | kulunud materjal: {best_result['material_m2']:.2f} m² | "
         f"koguaeg: {sec_to_minsec(best_result['total_sec'])}."
     )
 
@@ -553,10 +559,11 @@ if results and best_result:
     with st.expander("Eeldused ja usaldusinfo"):
         st.write("- Töörežiim tuvastatakse automaatselt detaili ja tooriku mõõtude järgi.")
         st.write("- Detaili pööramine arvestatakse automaatselt.")
-        st.write("- Ketta soovitus võrdleb toorikute arvu, materjalikulu, saetee kulu ja koguaega.")
-        st.write("- 3.5 mm ketas eelistub, kui ta annab väiksema materjalikulu või väiksema kogukulu.")
-        st.write("- 5.6 mm ketas võib eelistuda, kui setup ja koguaeg muutuvad väiksemaks ning materjalikulu ei halvene piisavalt.")
-        st.write("- Ümardamisreegel: toorikute arv ümardatakse alati üles täisarvuni.")
-        st.write(f"Viimane uuendus: {LAST_UPDATED}")
+        st.write("- Materjalikulu tähendab ainult detailide tegemiseks kulunud materjali koos saeteega.")
+        st.write("- Täisplaadi väärtuse hoidmiseks eelistatakse lahendust, mis jätab parema alles jääva osa.")
+        st.write("- Ketta soovitus võrdleb kulunud materjali, toorikute arvu, jäägi väärtust ja koguaega.")
+        st.write("- 3.5 mm ketas eelistub, kui see säästab materjali või vähendab kogukulu.")
+        st.write("- 5.6 mm ketas eelistub, kui ta annab parema töökiiruse või väiksema toorikute arvu ilma materjalikulu oluliselt kasvatamata.")
+        st.write(f"- Viimane uuendus: {LAST_UPDATED}")
 else:
-    st.info("Sisesta andmed või vajuta 'Proovi näitega', seejärel 'Arvuta'.")
+    st.info("Sisesta andmed ja vajuta Arvuta.")
