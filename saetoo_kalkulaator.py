@@ -12,6 +12,13 @@ MIN_USABLE_OFFCUT_WIDTH_MM = 150.0
 MIN_USABLE_OFFCUT_LENGTH_MM = 1000.0
 MIN_USABLE_OFFCUT_AREA_M2 = 0.15
 
+BASE_SETUP_SEC = 20 * 60
+SMALL_BLADE_SWITCH_SEC = 5 * 60
+BASE_HANDLING_PER_SHEET_SEC = 90
+HANDLING_PER_M2_SEC = 45
+RIP_HANDLING_PER_CUT_SEC = 20
+PARTIAL_SHEET_EXTRA_SEC = 60
+
 LARGE_BLADE = {
     "blade": "5.6 mm",
     "kerf_mm": 5.6,
@@ -20,8 +27,8 @@ LARGE_BLADE = {
 }
 
 SMALL_BLADE = {
-    "blade": "3.2 mm",
-    "kerf_mm": 3.2,
+    "blade": "3.1 mm",
+    "kerf_mm": 3.1,
     "max_stack_mm": 30.0,
     "is_default": False,
 }
@@ -44,6 +51,7 @@ DEFAULTS = {
     "detail_length_mm": "",
     "detail_width_mm": "",
     "detail_count": "",
+    "trim_edges": True,
     "last_results": None,
     "best_result": None,
 }
@@ -51,6 +59,18 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
+def clear_inputs():
+    st.session_state.thickness_mm = 20
+    st.session_state.raw_width_mm = ""
+    st.session_state.raw_length_mm = ""
+    st.session_state.detail_width_mm = ""
+    st.session_state.detail_length_mm = ""
+    st.session_state.detail_count = ""
+    st.session_state.trim_edges = True
+    st.session_state.last_results = None
+    st.session_state.best_result = None
 
 
 def get_sec_per_meter(thickness_mm):
@@ -102,7 +122,7 @@ def used_size_mm(piece_count, piece_size_mm, kerf_mm):
 
 
 def blade_switch_setup_sec(blade):
-    return 0 if blade["is_default"] else 5 * 60
+    return 0 if blade["is_default"] else SMALL_BLADE_SWITCH_SEC
 
 
 def offcut_is_usable(width_mm, length_mm):
@@ -217,6 +237,56 @@ def validate_common(
     return None
 
 
+def build_partial_layout_options(partial_piece_count, max_across, max_along, piece_w, piece_l, kerf_mm, raw_width_mm, raw_length_mm):
+    options = []
+
+    for cols in range(1, min(max_across, partial_piece_count) + 1):
+        rows = math.ceil(partial_piece_count / cols)
+        if rows > max_along:
+            continue
+
+        used_w = used_size_mm(cols, piece_w, kerf_mm)
+        used_l = used_size_mm(rows, piece_l, kerf_mm)
+
+        if used_w > raw_width_mm or used_l > raw_length_mm:
+            continue
+
+        offcuts = get_simple_offcuts(raw_width_mm, raw_length_mm, used_w, used_l)
+        usable_area = sum(o["area_m2"] for o in offcuts if o["usable"])
+        theoretical_offcut = max(0.0, area_m2(raw_width_mm, raw_length_mm) - area_m2(used_w, used_l))
+        non_usable = max(0.0, theoretical_offcut - usable_area)
+
+        rip_cut_count = cols
+        cross_cut_count = cols * rows
+
+        options.append(
+            {
+                "cols": cols,
+                "rows": rows,
+                "used_width_mm": used_w,
+                "used_length_mm": used_l,
+                "usable_offcut_area_m2": usable_area,
+                "non_usable_offcut_area_m2": non_usable,
+                "offcuts": offcuts,
+                "rip_cut_count": rip_cut_count,
+                "cross_cut_count": cross_cut_count,
+            }
+        )
+
+    if not options:
+        return None
+
+    options.sort(
+        key=lambda x: (
+            -x["usable_offcut_area_m2"],
+            x["non_usable_offcut_area_m2"],
+            x["used_width_mm"] * x["used_length_mm"],
+            x["rip_cut_count"] + x["cross_cut_count"],
+        )
+    )
+    return options[0]
+
+
 def build_orientation_result(
     blade,
     thickness_mm,
@@ -225,8 +295,12 @@ def build_orientation_result(
     input_detail_width_mm,
     input_detail_length_mm,
     detail_count,
+    trim_edges,
     rotated,
 ):
+    if thickness_mm > blade["max_stack_mm"]:
+        return None
+
     if rotated:
         detail_width_mm = input_detail_length_mm
         detail_length_mm = input_detail_width_mm
@@ -252,8 +326,12 @@ def build_orientation_result(
     full_used_width_mm = used_size_mm(across, detail_width_mm, kerf_mm)
     full_used_length_mm = used_size_mm(along, detail_length_mm, kerf_mm)
 
-    rip_cut_count_full = max(0, across - 1)
-    cross_cut_count_full = across * max(0, along - 1)
+    if trim_edges:
+        rip_cut_count_full = across
+        cross_cut_count_full = across * along
+    else:
+        rip_cut_count_full = max(0, across - 1)
+        cross_cut_count_full = across * max(0, along - 1)
 
     rip_kerf_area_full_mm2 = rip_cut_count_full * raw_length_mm * kerf_mm
     cross_kerf_area_full_mm2 = cross_cut_count_full * detail_width_mm * kerf_mm
@@ -266,47 +344,41 @@ def build_orientation_result(
     rip_cut_count_partial = 0
     cross_cut_count_partial = 0
     kerf_area_partial_mm2 = 0.0
-    partial_columns = 0
-    full_columns_partial = 0
-    partial_rows_last = 0
+    partial_cols = 0
+    partial_rows = 0
+    partial_offcuts = []
 
     if partial_piece_count > 0:
-        full_columns_partial = partial_piece_count // along
-        remainder_in_last_column = partial_piece_count % along
-
-        if remainder_in_last_column == 0:
-            partial_columns = full_columns_partial
-            partial_rows_last = 0
-        else:
-            partial_columns = full_columns_partial + 1
-            partial_rows_last = remainder_in_last_column
-
-        partial_used_width_mm = used_size_mm(partial_columns, detail_width_mm, kerf_mm)
-
-        if full_columns_partial > 0:
-            partial_used_length_mm = used_size_mm(along, detail_length_mm, kerf_mm)
-
-        if partial_rows_last > 0:
-            last_col_length_mm = used_size_mm(partial_rows_last, detail_length_mm, kerf_mm)
-            partial_used_length_mm = max(partial_used_length_mm, last_col_length_mm)
-
-        rip_cut_count_partial = max(0, partial_columns - 1)
-
-        cross_cut_count_partial = (
-            full_columns_partial * max(0, along - 1)
-            + max(0, partial_rows_last - 1)
+        partial_layout = build_partial_layout_options(
+            partial_piece_count,
+            across,
+            along,
+            detail_width_mm,
+            detail_length_mm,
+            kerf_mm,
+            raw_width_mm,
+            raw_length_mm,
         )
+
+        if partial_layout is None:
+            return None
+
+        partial_cols = partial_layout["cols"]
+        partial_rows = partial_layout["rows"]
+        partial_used_width_mm = partial_layout["used_width_mm"]
+        partial_used_length_mm = partial_layout["used_length_mm"]
+        partial_offcuts = partial_layout["offcuts"]
+
+        if trim_edges:
+            rip_cut_count_partial = partial_layout["cols"]
+            cross_cut_count_partial = partial_layout["cols"] * partial_layout["rows"]
+        else:
+            rip_cut_count_partial = max(0, partial_layout["cols"] - 1)
+            cross_cut_count_partial = partial_layout["cols"] * max(0, partial_layout["rows"] - 1)
 
         rip_kerf_area_partial_mm2 = rip_cut_count_partial * raw_length_mm * kerf_mm
-
-        cross_kerf_area_partial_mm2 = (
-            full_columns_partial * max(0, along - 1) * detail_width_mm * kerf_mm
-            + max(0, partial_rows_last - 1) * detail_width_mm * kerf_mm
-        )
-
-        kerf_area_partial_mm2 = (
-            rip_kerf_area_partial_mm2 + cross_kerf_area_partial_mm2
-        )
+        cross_kerf_area_partial_mm2 = cross_cut_count_partial * detail_width_mm * kerf_mm
+        kerf_area_partial_mm2 = rip_kerf_area_partial_mm2 + cross_kerf_area_partial_mm2
 
     net_detail_area_m2 = (
         full_pattern_count * net_detail_area_full_mm2
@@ -331,16 +403,6 @@ def build_orientation_result(
         full_used_width_mm,
         full_used_length_mm,
     )
-
-    if partial_piece_count > 0:
-        partial_offcuts = get_simple_offcuts(
-            raw_width_mm,
-            raw_length_mm,
-            partial_used_width_mm,
-            partial_used_length_mm,
-        )
-    else:
-        partial_offcuts = []
 
     usable_offcut_area_m2, largest_usable_offcut, largest_any_offcut = summarize_offcuts(
         full_offcuts,
@@ -371,8 +433,16 @@ def build_orientation_result(
     cross_time_sec = (detail_width_mm / 1000.0) * sec_per_m * 2 * cross_cut_count
     cutting_time_sec = rip_time_sec + cross_time_sec
 
-    setup_sec = 20 * 60 + blade_switch_setup_sec(blade)
-    total_sec = cutting_time_sec + setup_sec
+    setup_sec = BASE_SETUP_SEC + blade_switch_setup_sec(blade)
+
+    handling_per_sheet_sec = BASE_HANDLING_PER_SHEET_SEC + sheet_area_m2 * HANDLING_PER_M2_SEC
+    handling_sec = (
+        opened_sheet_count * handling_per_sheet_sec
+        + rip_cut_count * RIP_HANDLING_PER_CUT_SEC
+        + (PARTIAL_SHEET_EXTRA_SEC if partial_pattern_count > 0 else 0)
+    )
+
+    total_sec = cutting_time_sec + setup_sec + handling_sec
 
     warning = None
     if detail_width_mm < 20:
@@ -381,6 +451,7 @@ def build_orientation_result(
     return {
         "blade": blade,
         "rotated": rotated,
+        "trim_edges": trim_edges,
         "raw_width_mm": raw_width_mm,
         "raw_length_mm": raw_length_mm,
         "input_detail_width_mm": input_detail_width_mm,
@@ -395,6 +466,8 @@ def build_orientation_result(
         "full_pattern_count": full_pattern_count,
         "partial_pattern_count": partial_pattern_count,
         "partial_piece_count": partial_piece_count,
+        "partial_cols": partial_cols,
+        "partial_rows": partial_rows,
         "net_detail_area_m2": net_detail_area_m2,
         "kerf_area_m2": kerf_area_m2,
         "consumed_area_m2": consumed_area_m2,
@@ -411,6 +484,8 @@ def build_orientation_result(
         "total_cut_count": total_cut_count,
         "cutting_time_sec": cutting_time_sec,
         "setup_sec": setup_sec,
+        "handling_sec": handling_sec,
+        "handling_per_sheet_sec": handling_per_sheet_sec,
         "total_sec": total_sec,
         "scheme_used_width_mm": scheme_used_width_mm,
         "scheme_used_length_mm": scheme_used_length_mm,
@@ -434,10 +509,8 @@ def result_sort_key(result):
 
 def choose_best_result(results):
     valid = [r for r in results if r is not None]
-
     if not valid:
         return None
-
     return min(valid, key=result_sort_key)
 
 
@@ -449,6 +522,7 @@ def build_best_result_for_blade(
     detail_width_mm,
     detail_length_mm,
     detail_count,
+    trim_edges,
 ):
     normal = build_orientation_result(
         blade,
@@ -458,6 +532,7 @@ def build_best_result_for_blade(
         detail_width_mm,
         detail_length_mm,
         detail_count,
+        trim_edges,
         rotated=False,
     )
 
@@ -469,6 +544,7 @@ def build_best_result_for_blade(
         detail_width_mm,
         detail_length_mm,
         detail_count,
+        trim_edges,
         rotated=True,
     )
 
@@ -481,21 +557,22 @@ def add_blade_reasons(results, best):
             continue
 
         orientation_text = "pööratud detailiga" if r["rotated"] else "pööramata detailiga"
+        trim_text = "ääretrimmi arvestusega" if r["trim_edges"] else "ilma ääretrimmi arvestuseta"
 
         if r is best:
             r["blade_reason"] = (
-                f"Soovitatud variant: {orientation_text}, "
+                f"Soovitatud variant: {orientation_text}, {trim_text}, "
                 f"avatud plaate {r['opened_sheet_count']} tk, "
-                f"detailid + saetee {r['consumed_area_m2']:.2f} m², "
+                f"detailide pind + saetee kadu {r['consumed_area_m2']:.2f} m², "
                 f"kasutatav jääk {r['usable_offcut_area_m2']:.2f} m², "
                 f"mittearvestatav jääk {r['non_usable_offcut_area_m2']:.2f} m², "
                 f"lõikeid kokku {r['total_cut_count']}."
             )
         else:
             r["blade_reason"] = (
-                f"Alternatiiv: {orientation_text}, "
+                f"Alternatiiv: {orientation_text}, {trim_text}, "
                 f"avatud plaate {r['opened_sheet_count']} tk, "
-                f"detailid + saetee {r['consumed_area_m2']:.2f} m², "
+                f"detailide pind + saetee kadu {r['consumed_area_m2']:.2f} m², "
                 f"kasutatav jääk {r['usable_offcut_area_m2']:.2f} m², "
                 f"mittearvestatav jääk {r['non_usable_offcut_area_m2']:.2f} m², "
                 f"lõikeid kokku {r['total_cut_count']}."
@@ -582,7 +659,7 @@ def draw_scheme(result):
 
 def render_result_card(result, best_blade_name):
     if result is None:
-        st.error("Selle kettaga detail ei mahu.")
+        st.error("Selle kettaga detail ei mahu või ketta max paksus ei luba.")
         return
 
     if result["blade"]["blade"] == best_blade_name:
@@ -594,7 +671,7 @@ def render_result_card(result, best_blade_name):
 
     c1, c2 = st.columns(2)
     c1.metric("Avatud plaate", f"{result['opened_sheet_count']} tk")
-    c2.metric("Detailid + saetee", f"{result['consumed_area_m2']:.2f} m²")
+    c2.metric("Detailide pind + saetee kadu", f"{result['consumed_area_m2']:.2f} m²")
 
     c3, c4 = st.columns(2)
     c3.metric("Kasutatav jääk", f"{result['usable_offcut_area_m2']:.2f} m²")
@@ -606,15 +683,17 @@ def render_result_card(result, best_blade_name):
         ["Sisestatud detail", f"{fmt(result['input_detail_width_mm'])} x {fmt(result['input_detail_length_mm'])} mm"],
         ["Arvutuses kasutatud detail", f"{fmt(result['detail_width_mm'])} x {fmt(result['detail_length_mm'])} mm"],
         ["Pööratud", "Jah" if result["rotated"] else "Ei"],
+        ["Ääretrimmi arvestus", "Jah" if result["trim_edges"] else "Ei"],
         ["Ühest plaadist", f"{result['pieces_per_sheet']} detaili"],
         ["Laiuses", f"{result['across']} tk"],
         ["Pikkuses", f"{result['along']} tk"],
         ["Täismustriga plaate", f"{result['full_pattern_count']} tk"],
         ["Osalisi plaate", f"{result['partial_pattern_count']} tk"],
         ["Viimasel osalisel plaadil", f"{result['partial_piece_count']} detaili"],
+        ["Osalise plaadi paigutus", f"{result['partial_cols']} veergu x {result['partial_rows']} rida" if result["partial_piece_count"] > 0 else "-"],
         ["Detailide netopind", f"{result['net_detail_area_m2']:.2f} m²"],
-        ["Saetee kulu", f"{result['kerf_area_m2']:.2f} m²"],
-        ["Detailid + saetee", f"{result['consumed_area_m2']:.2f} m²"],
+        ["Saetee kadu", f"{result['kerf_area_m2']:.2f} m²"],
+        ["Detailide pind + saetee kadu", f"{result['consumed_area_m2']:.2f} m²"],
         ["Avatud plaatide pind", f"{result['opened_sheet_area_m2']:.2f} m²"],
         ["Teoreetiline jääk", f"{result['theoretical_offcut_area_m2']:.2f} m²"],
         ["Kasutatav jääk", f"{result['usable_offcut_area_m2']:.2f} m²"],
@@ -626,6 +705,8 @@ def render_result_card(result, best_blade_name):
         ["Lõikeid kokku", f"{result['total_cut_count']}"],
         ["Lõikeaeg", sec_to_minsec(result["cutting_time_sec"])],
         ["Setup aeg", sec_to_minsec(result["setup_sec"])],
+        ["Käsitsemisaeg", sec_to_minsec(result["handling_sec"])],
+        ["Käsitsemisaeg / plaat", sec_to_minsec(result["handling_per_sheet_sec"])],
     ]
 
     st.table(rows)
@@ -655,8 +736,14 @@ def render_result_card(result, best_blade_name):
 
 st.title("🪚 Saetöö kalkulaator")
 st.caption(
-    "Talasae loogika: detailid + saetee on eraldi, avatud plaadid ja kasutatav jääk on eraldi."
+    "Talasae loogika: detailide pind, saetee kadu, avatud plaadid, jäägid ja käsitsemisaeg on näidatud eraldi."
 )
+
+top_left, top_right = st.columns([5, 1])
+with top_right:
+    if st.button("Tühjenda väljad", use_container_width=True):
+        clear_inputs()
+        st.rerun()
 
 with st.form("calc_form", enter_to_submit=False):
     col1, col2, col3 = st.columns(3)
@@ -708,6 +795,11 @@ with st.form("calc_form", enter_to_submit=False):
         placeholder="Nt 20",
     )
 
+    trim_edges = st.checkbox(
+        "Arvesta ääretrimmi / väliste eralduslõigetega",
+        value=st.session_state.trim_edges,
+    )
+
     submitted = st.form_submit_button("Arvuta", use_container_width=True)
 
 if submitted:
@@ -727,6 +819,7 @@ if submitted:
     st.session_state.detail_width_mm = str(detail_width_mm)
     st.session_state.detail_length_mm = str(detail_length_mm)
     st.session_state.detail_count = str(detail_count)
+    st.session_state.trim_edges = bool(trim_edges)
 
     error = validate_common(
         int(thickness_mm),
@@ -750,6 +843,7 @@ if submitted:
             detail_width_mm,
             detail_length_mm,
             int(detail_count),
+            bool(trim_edges),
         )
         for blade in BLADES
     ]
@@ -757,7 +851,7 @@ if submitted:
     best_result = choose_best_result(results)
 
     if best_result is None:
-        st.error("Detail ei mahu antud toorikusse kummagi kettaga.")
+        st.error("Detail ei mahu antud toorikusse või ketta max paksus ei luba kummagi variandi kasutamist.")
         st.stop()
 
     add_blade_reasons(results, best_result)
@@ -772,7 +866,7 @@ if results and best_result:
     st.success(
         f"Soovitus: {best_result['blade']['blade']} | "
         f"avatud plaate {best_result['opened_sheet_count']} tk | "
-        f"detailid + saetee {best_result['consumed_area_m2']:.2f} m² | "
+        f"detailide pind + saetee kadu {best_result['consumed_area_m2']:.2f} m² | "
         f"kasutatav jääk {best_result['usable_offcut_area_m2']:.2f} m² | "
         f"mittearvestatav jääk {best_result['non_usable_offcut_area_m2']:.2f} m² | "
         f"koguaeg {sec_to_minsec(best_result['total_sec'])}."
@@ -789,23 +883,28 @@ if results and best_result:
     with st.expander("Arvestuse loogika"):
         st.write("- Detail arvutatakse läbi kahes orientatsioonis: sisestatud asendis ja pööratult.")
         st.write("- Iga ketta puhul valitakse kõigepealt parem orientatsioon.")
-        st.write("- Seejärel võrreldakse 5.6 mm ja 3.2 mm ketta parimaid variante.")
-        st.write("- Detailid + saetee = detailide netopind + saetera lõikejälje pind.")
+        st.write("- Seejärel võrreldakse 5.6 mm ja 3.1 mm ketta parimaid variante.")
+        st.write("- Kui paksus ületab ketta lubatud max paksuse, siis seda varianti ei arvestata.")
+        st.write("- Detailide pind + saetee kadu = detailide netopind + saetera lõikejälje pind.")
         st.write("- Avatud plaatide pind näitab, kui palju plaate tuleb tööks avada.")
-        st.write("- Teoreetiline jääk = avatud plaatide pind - detailid - saetee.")
+        st.write("- Teoreetiline jääk = avatud plaatide pind - detailide netopind - saetee kadu.")
         st.write(
             f"- Kasutatav jääk peab olema vähemalt "
-            f"{int(MIN_USABLE_OFFCUT_WIDTH_MM)} x {int(MIN_USABLE_OFFCUT_LENGTH_MM)} mm "
-            f"või pööratult."
+            f"{int(MIN_USABLE_OFFCUT_WIDTH_MM)} mm kitsamast küljest ja "
+            f"{int(MIN_USABLE_OFFCUT_LENGTH_MM)} mm pikemast küljest."
         )
         st.write(
             f"- Lisaks peab kasutatava jäägi pind olema vähemalt "
             f"{MIN_USABLE_OFFCUT_AREA_M2:.2f} m²."
         )
-        st.write("- Näiteks 3000 x 100 mm riba on mittearvestatav jääk, sest väiksem mõõt on alla 150 mm.")
+        st.write("- Näiteks 3000 x 100 mm riba on mittearvestatav jääk, sest kitsam külg on alla 150 mm.")
         st.write("- Mittearvestatav jääk on teoreetiline jääk, millest on maha võetud kasutatav jääk.")
         st.write("- Lõikeskeem näitab arvutuses kasutatud ala, mitte alati tervet plaati.")
-        st.write("- Osaline viimane plaat täidetakse veergude kaupa ülevalt alla.")
+        st.write("- Viimane osaline plaat optimeeritakse erinevate veeru-rea kombinatsioonide vahel, et saada parem jääk.")
+        st.write("- Ääretrimmi saab vajadusel sisse või välja lülitada.")
+        st.write("- Käsitsemisaeg sõltub nii plaatide arvust kui ka plaadi pindalast.")
+        st.write("- Koguaeg = lõikeaeg + setup aeg + käsitsemisaeg.")
+        st.write("- Käsitsemisaeg arvestab avatud plaatide käsitlemist, ribade eest ära pakkimist ja viimase osalise plaadi lisatööd.")
 
 else:
     st.info("Sisesta andmed ja vajuta Arvuta.")
