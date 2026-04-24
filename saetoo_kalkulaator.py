@@ -26,7 +26,6 @@ st.set_page_config(page_title="Saetöö kalkulaator", page_icon="🪚", layout="
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 HISTORY_FILE = DATA_DIR / "saetoo_ajalugu.csv"
-UPLOADED_HISTORY_FILE = DATA_DIR / "uploaded_history_session.csv"
 
 MAX_LENGTH_MM = 3050.0
 MAX_WIDTH_MM = 2050.0
@@ -63,7 +62,10 @@ SMALL_BLADE = {
 
 BLADES = [LARGE_BLADE, SMALL_BLADE]
 
-THICKNESS_OPTIONS_MM = list(range(1, 13)) + [15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]
+THICKNESS_OPTIONS_MM = (
+    list(range(1, 13))
+    + [15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]
+)
 
 COLOR_SHEET = "#e6e6e6"
 COLOR_DETAIL = "#b7d7ff"
@@ -95,13 +97,6 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
-
-
-def safe_rerun():
-    if hasattr(st, "rerun"):
-        st.rerun()
-    elif hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
 
 
 def clear_calc_inputs():
@@ -167,6 +162,13 @@ def parse_float_text(value):
     return float(str(value).replace(",", ".").strip())
 
 
+def parse_optional_minutes_to_seconds(value):
+    text = str(value).replace(",", ".").strip()
+    if not text:
+        return 0.0
+    return float(text) * 60
+
+
 def area_m2(width_mm, length_mm):
     if width_mm <= 0 or length_mm <= 0:
         return 0.0
@@ -187,6 +189,76 @@ def used_size_mm(piece_count, piece_size_mm, kerf_mm):
 
 def blade_switch_setup_sec(blade):
     return 0 if blade["is_default"] else SMALL_BLADE_SWITCH_SEC
+
+
+def get_stack_sheet_capacity(thickness_mm, blade):
+    if thickness_mm <= 0:
+        return 1
+    return max(1, math.floor(blade["max_stack_mm"] / thickness_mm))
+
+
+def get_stack_groups(sheet_count, thickness_mm, blade):
+    capacity = get_stack_sheet_capacity(thickness_mm, blade)
+    full_groups = sheet_count // capacity
+    remainder = sheet_count % capacity
+    groups = [capacity] * full_groups
+    if remainder > 0:
+        groups.append(remainder)
+    return groups
+
+
+def calculate_single_sheet_cut_counts(
+    raw_width_mm,
+    raw_length_mm,
+    used_width_mm,
+    used_length_mm,
+    cols,
+    rows,
+    piece_count,
+    trim_edges,
+):
+    pre_rip_cuts = 0
+    pre_cross_cuts = 0
+
+    if trim_edges:
+        if used_length_mm < raw_length_mm:
+            pre_cross_cuts += 2
+        if used_width_mm < raw_width_mm:
+            pre_rip_cuts += 1
+
+    rip_cut_count = cols
+    cross_cut_count = piece_count
+
+    return pre_rip_cuts + rip_cut_count, pre_cross_cuts + cross_cut_count
+
+
+def calculate_stack_cut_counts(
+    raw_width_mm,
+    raw_length_mm,
+    used_width_mm,
+    used_length_mm,
+    cols,
+    rows,
+    piece_count,
+    opened_sheet_count,
+    trim_edges,
+):
+    pre_rip_cuts = 0
+    pre_cross_cuts = 0
+
+    if trim_edges:
+        if used_length_mm < raw_length_mm:
+            pre_cross_cuts += 2
+        if used_width_mm < raw_width_mm:
+            pre_rip_cuts += 1
+
+    stack_rip_cut_count = cols
+    stack_cross_cut_count = piece_count
+
+    total_rip_cut_count = pre_rip_cuts + stack_rip_cut_count
+    total_cross_cut_count = pre_cross_cuts + stack_cross_cut_count
+
+    return total_rip_cut_count, total_cross_cut_count
 
 
 def offcut_is_usable(width_mm, length_mm):
@@ -278,7 +350,16 @@ def validate_common(thickness_mm, raw_length_mm, raw_width_mm, detail_length_mm,
     return None
 
 
-def build_partial_layout_options(partial_piece_count, max_across, max_along, piece_w, piece_l, kerf_mm, raw_width_mm, raw_length_mm):
+def build_partial_layout_options(
+    partial_piece_count,
+    max_across,
+    max_along,
+    piece_w,
+    piece_l,
+    kerf_mm,
+    raw_width_mm,
+    raw_length_mm,
+):
     options = []
 
     for cols in range(1, min(max_across, partial_piece_count) + 1):
@@ -361,14 +442,6 @@ def build_orientation_result(
     full_used_width_mm = used_size_mm(across, detail_width_mm, kerf_mm)
     full_used_length_mm = used_size_mm(along, detail_length_mm, kerf_mm)
 
-    if trim_edges:
-        rip_cut_count_full = across
-        cross_cut_count_full = across * along
-    else:
-        rip_cut_count_full = max(0, across - 1)
-        cross_cut_count_full = across * max(0, along - 1)
-
-    kerf_area_full_mm2 = rip_cut_count_full * raw_length_mm * kerf_mm + cross_cut_count_full * detail_width_mm * kerf_mm
     net_detail_area_full_mm2 = pieces_per_sheet * detail_width_mm * detail_length_mm
 
     partial_used_width_mm = 0.0
@@ -377,8 +450,6 @@ def build_orientation_result(
     partial_rows = 0
     partial_offcuts = []
     kerf_area_partial_mm2 = 0.0
-    rip_cut_count_partial = 0
-    cross_cut_count_partial = 0
 
     if partial_piece_count > 0:
         partial_layout = build_partial_layout_options(
@@ -391,7 +462,6 @@ def build_orientation_result(
             raw_width_mm,
             raw_length_mm,
         )
-
         if partial_layout is None:
             return None
 
@@ -401,23 +471,48 @@ def build_orientation_result(
         partial_used_length_mm = partial_layout["used_length_mm"]
         partial_offcuts = partial_layout["offcuts"]
 
-        if trim_edges:
-            rip_cut_count_partial = partial_cols
-            cross_cut_count_partial = partial_cols * partial_rows
-        else:
-            rip_cut_count_partial = max(0, partial_cols - 1)
-            cross_cut_count_partial = partial_cols * max(0, partial_rows - 1)
+    rip_cut_count = 0
+    cross_cut_count = 0
+    kerf_area_full_mm2_total = 0.0
 
-        kerf_area_partial_mm2 = (
-            rip_cut_count_partial * raw_length_mm * kerf_mm
-            + cross_cut_count_partial * detail_width_mm * kerf_mm
+    for group_size in get_stack_groups(full_pattern_count, thickness_mm, blade):
+        group_rip, group_cross = calculate_stack_cut_counts(
+            raw_width_mm=raw_width_mm,
+            raw_length_mm=raw_length_mm,
+            used_width_mm=full_used_width_mm,
+            used_length_mm=full_used_length_mm,
+            cols=across,
+            rows=along,
+            piece_count=pieces_per_sheet,
+            opened_sheet_count=group_size,
+            trim_edges=trim_edges,
         )
+        rip_cut_count += group_rip
+        cross_cut_count += group_cross
+        kerf_area_full_mm2_total += group_rip * raw_length_mm * kerf_mm + group_cross * detail_width_mm * kerf_mm
+
+    if partial_piece_count > 0:
+        partial_rip, partial_cross = calculate_single_sheet_cut_counts(
+            raw_width_mm=raw_width_mm,
+            raw_length_mm=raw_length_mm,
+            used_width_mm=partial_used_width_mm,
+            used_length_mm=partial_used_length_mm,
+            cols=partial_cols,
+            rows=partial_rows,
+            piece_count=partial_piece_count,
+            trim_edges=trim_edges,
+        )
+        rip_cut_count += partial_rip
+        cross_cut_count += partial_cross
+        kerf_area_partial_mm2 = partial_rip * raw_length_mm * kerf_mm + partial_cross * detail_width_mm * kerf_mm
+
+    total_cut_count = rip_cut_count + cross_cut_count
 
     net_detail_area_m2 = (
         full_pattern_count * net_detail_area_full_mm2
         + partial_piece_count * detail_width_mm * detail_length_mm
     ) / 1_000_000.0
-    kerf_area_m2 = (full_pattern_count * kerf_area_full_mm2 + kerf_area_partial_mm2) / 1_000_000.0
+    kerf_area_m2 = (kerf_area_full_mm2_total + kerf_area_partial_mm2) / 1_000_000.0
     consumed_area_m2 = net_detail_area_m2 + kerf_area_m2
 
     sheet_area_m2 = area_m2(raw_width_mm, raw_length_mm)
@@ -443,10 +538,6 @@ def build_orientation_result(
         scheme_used_width_mm = full_used_width_mm
         scheme_used_length_mm = full_used_length_mm
         scheme_piece_count = pieces_per_sheet
-
-    rip_cut_count = full_pattern_count * rip_cut_count_full + rip_cut_count_partial
-    cross_cut_count = full_pattern_count * cross_cut_count_full + cross_cut_count_partial
-    total_cut_count = rip_cut_count + cross_cut_count
 
     rip_time_sec = (raw_length_mm / 1000.0) * sec_per_m * 2 * rip_cut_count
     cross_time_sec = (detail_width_mm / 1000.0) * sec_per_m * 2 * cross_cut_count
@@ -730,17 +821,13 @@ def train_ml_model_cached(csv_path, mtime):
 
     available_numeric = [c for c in numeric_features if c in df.columns]
     available_categorical = [c for c in categorical_features if c in df.columns]
-    feature_cols = available_numeric + available_categorical
 
     data = df.dropna(subset=["actual_time_sec"]).copy()
     data["actual_time_sec"] = pd.to_numeric(data["actual_time_sec"], errors="coerce")
     data = data.dropna(subset=["actual_time_sec"])
 
     if len(data) < ML_MIN_ROWS_TO_TRAIN:
-        return None, feature_cols, None, len(data)
-
-    if not feature_cols:
-        return None, feature_cols, None, len(data)
+        return None, available_numeric + available_categorical, None, len(data)
 
     for col in available_numeric:
         data[col] = pd.to_numeric(data[col], errors="coerce")
@@ -748,7 +835,7 @@ def train_ml_model_cached(csv_path, mtime):
     for col in available_categorical:
         data[col] = data[col].fillna("").astype(str)
 
-    X = data[feature_cols].copy()
+    X = data[available_numeric + available_categorical].copy()
     y = data["actual_time_sec"].astype(float)
 
     preprocessor = ColumnTransformer(
@@ -797,18 +884,12 @@ def train_ml_model_cached(csv_path, mtime):
 
     model.fit(X, y)
 
-    return model, feature_cols, mae, len(data)
+    return model, available_numeric + available_categorical, mae, len(data)
 
 
 def get_trained_model():
-    if not st.session_state.history_df.empty:
-        st.session_state.history_df.to_csv(UPLOADED_HISTORY_FILE, index=False)
-        mtime = UPLOADED_HISTORY_FILE.stat().st_mtime
-        return train_ml_model_cached(str(UPLOADED_HISTORY_FILE), mtime)
-
     if not HISTORY_FILE.exists():
         return None, None, None, 0
-
     mtime = HISTORY_FILE.stat().st_mtime
     return train_ml_model_cached(str(HISTORY_FILE), mtime)
 
@@ -963,26 +1044,47 @@ top1, top2 = st.columns([5, 1])
 with top2:
     if st.button("Tühjenda kalkulaatori väljad", use_container_width=True):
         clear_calc_inputs()
-        safe_rerun()
+        st.rerun()
 
 tab_calc, tab_worklog, tab_history, tab_ml = st.tabs(["Kalkulaator", "Tehtud töö", "Ajalugu", "ML"])
 
 with tab_worklog:
     st.subheader("Tehtud töö andmed")
 
-    st.text_input("Tellimuse / töö number", key="order_id", placeholder="Nt T-240426-01")
-    st.text_input("Operaator", key="operator", placeholder="Nimi")
-    st.text_input("Materjal", key="material", placeholder="Nt PE1000")
-    st.text_input("Masin", key="machine_id", placeholder="Nt Saag-1")
-    st.text_input("Vahetus", key="shift", placeholder="Nt hommik")
-    st.text_input("Tegelik tööaeg minutites", key="actual_time_min", placeholder="Nt 20")
-    st.checkbox("Tekkis praak / ümbertöö", key="was_scrap")
-    st.text_input("Praagi põhjus", key="scrap_reason", placeholder="Nt mõõduviga")
-    st.text_input("Ümbertöö aeg minutites", key="rework_time_min", placeholder="Nt 5")
+    with st.form("worklog_form", enter_to_submit=False):
+        wl1, wl2 = st.columns(2)
+
+        with wl1:
+            order_id = st.text_input("Tellimuse / töö number", value=st.session_state.order_id, placeholder="Nt T-240426-01")
+            operator = st.text_input("Operaator", value=st.session_state.operator, placeholder="Nimi")
+            material = st.text_input("Materjal", value=st.session_state.material, placeholder="Nt PE1000")
+            machine_id = st.text_input("Masin", value=st.session_state.machine_id, placeholder="Nt Saag-1")
+
+        with wl2:
+            shift = st.text_input("Vahetus", value=st.session_state.shift, placeholder="Nt hommik")
+            actual_time_min = st.text_input("Tegelik tööaeg minutites", value=st.session_state.actual_time_min, placeholder="Nt 20")
+            was_scrap = st.checkbox("Tekkis praak / ümbertöö", value=st.session_state.was_scrap)
+            scrap_reason = st.text_input("Praagi põhjus", value=st.session_state.scrap_reason, placeholder="Nt mõõduviga")
+            rework_time_min = st.text_input("Ümbertöö aeg minutites", value=st.session_state.rework_time_min, placeholder="Nt 5")
+
+        save_worklog = st.form_submit_button("Uuenda tööandmed", use_container_width=True)
+
+    if save_worklog:
+        st.session_state.order_id = order_id
+        st.session_state.operator = operator
+        st.session_state.material = material
+        st.session_state.machine_id = machine_id
+        st.session_state.shift = shift
+        st.session_state.actual_time_min = actual_time_min
+        st.session_state.was_scrap = was_scrap
+        st.session_state.scrap_reason = scrap_reason
+        st.session_state.rework_time_min = rework_time_min
+        st.session_state.pending_save_row = None
+        st.success("Tööandmed uuendatud.")
 
     if st.button("Tühjenda töölogi väljad", use_container_width=True):
         clear_worklog_inputs()
-        safe_rerun()
+        st.rerun()
 
 with tab_history:
     st.subheader("Ajalugu")
@@ -991,7 +1093,7 @@ with tab_history:
     if uploaded is not None:
         try:
             st.session_state.history_df = pd.read_csv(uploaded)
-            st.success("Ajalugu laaditud sessiooni vaatamiseks ja ML kasutuseks.")
+            st.success("Ajalugu laaditud sessiooni vaatamiseks.")
         except Exception:
             st.error("CSV laadimine ebaõnnestus.")
 
@@ -1019,7 +1121,7 @@ with tab_ml:
         st.info(f"ML mudelit pole veel võimalik kasutada. Õpperidu: {n_rows}. Vajalik vähemalt {ML_MIN_ROWS_TO_TRAIN}.")
     else:
         st.success(f"ML mudel on treenitud. Õpperidu: {n_rows}.")
-        st.write("Kasutatud tunnused:", ", ".join(feature_cols) if feature_cols else "-")
+        st.write("Kasutatud tunnused:", ", ".join(feature_cols))
         if mae is not None:
             st.metric("Mudeli keskmine viga (MAE)", sec_to_minsec(mae))
         else:
@@ -1030,7 +1132,7 @@ with tab_ml:
         else:
             st.warning("ML prognoosi kuvatakse, kuid otsuse valik jääb reeglipõhiseks.")
 
-    history_for_plot = st.session_state.history_df if not st.session_state.history_df.empty else load_history()
+    history_for_plot = load_history()
     if not history_for_plot.empty and {"estimated_time_sec", "actual_time_sec"}.issubset(history_for_plot.columns):
         plot_df = history_for_plot.copy()
         plot_df["estimated_time_sec"] = pd.to_numeric(plot_df["estimated_time_sec"], errors="coerce")
@@ -1219,7 +1321,8 @@ with tab_calc:
             save_history_row(st.session_state.pending_save_row)
             st.session_state.pending_save_row = None
             st.success("Töö salvestati ajalukku.")
-            safe_rerun()
+            st.rerun()
     elif submitted:
         st.subheader("Tehtud töö salvestus")
         st.warning("Ajalukku salvestamiseks sisesta 'Tehtud töö' tabis tegelik tööaeg minutites ja arvuta uuesti.")
+        
