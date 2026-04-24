@@ -1,2 +1,2 @@
-streamlit
-matplotlib
+streamlit==1.54.0
+matplotlib==3.10.1
