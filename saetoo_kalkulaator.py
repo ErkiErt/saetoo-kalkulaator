@@ -8,10 +8,18 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 try:
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import OneHotEncoder
+    from sklearn.impute import SimpleImputer
+    from sklearn.metrics import mean_absolute_error
+    from sklearn.model_selection import train_test_split
     from sklearn.ensemble import RandomForestRegressor
+
     SKLEARN_AVAILABLE = True
 except Exception:
     SKLEARN_AVAILABLE = False
+
 
 st.set_page_config(page_title="Saetöö kalkulaator", page_icon="🪚", layout="wide")
 
@@ -33,6 +41,10 @@ HANDLING_PER_M2_SEC = 45
 RIP_HANDLING_PER_CUT_SEC = 20
 PARTIAL_SHEET_EXTRA_SEC = 60
 THIN_MATERIAL_HANDLING_FACTOR = 0.33
+
+ML_MIN_ROWS_TO_TRAIN = 30
+ML_MIN_ROWS_TO_DECIDE = 50
+ML_MAX_ACCEPTABLE_MAE_SEC = 15 * 60
 
 LARGE_BLADE = {
     "blade": "5.6 mm",
@@ -64,14 +76,19 @@ DEFAULTS = {
     "detail_width_mm": "",
     "detail_count": "",
     "trim_edges": True,
+    "order_id": "",
     "operator": "",
     "material": "",
     "machine_id": "",
     "shift": "",
-    "actual_time_sec": "",
+    "actual_time_min": "",
+    "was_scrap": False,
+    "scrap_reason": "",
+    "rework_time_min": "",
     "last_results": None,
     "best_result": None,
     "history_df": pd.DataFrame(),
+    "pending_save_row": None,
 }
 
 for key, value in DEFAULTS.items():
@@ -89,14 +106,20 @@ def clear_calc_inputs():
     st.session_state.trim_edges = True
     st.session_state.last_results = None
     st.session_state.best_result = None
+    st.session_state.pending_save_row = None
 
 
 def clear_worklog_inputs():
+    st.session_state.order_id = ""
     st.session_state.operator = ""
     st.session_state.material = ""
     st.session_state.machine_id = ""
     st.session_state.shift = ""
-    st.session_state.actual_time_sec = ""
+    st.session_state.actual_time_min = ""
+    st.session_state.was_scrap = False
+    st.session_state.scrap_reason = ""
+    st.session_state.rework_time_min = ""
+    st.session_state.pending_save_row = None
 
 
 def get_sec_per_meter(thickness_mm):
@@ -118,6 +141,9 @@ def get_sec_per_meter(thickness_mm):
 
 
 def sec_to_minsec(seconds):
+    if seconds is None or pd.isna(seconds):
+        return "-"
+    seconds = max(0.0, float(seconds))
     minutes = int(seconds // 60)
     sec = round(seconds % 60, 1)
     return f"{minutes} min {sec} sek"
@@ -126,7 +152,11 @@ def sec_to_minsec(seconds):
 def fmt(v):
     if isinstance(v, float) and float(v).is_integer():
         return str(int(v))
-    return str(round(v, 2))
+    return str(round(float(v), 2))
+
+
+def parse_float_text(value):
+    return float(str(value).replace(",", ".").strip())
 
 
 def area_m2(width_mm, length_mm):
@@ -231,7 +261,10 @@ def validate_common(thickness_mm, raw_length_mm, raw_width_mm, detail_length_mm,
     if detail_count < 1:
         return "Detailide arv peab olema vähemalt 1."
     if thickness_mm not in THICKNESS_OPTIONS_MM:
-        return "Lubatud paksused on 1 kuni 12 mm sammuga 1 ning edasi 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85 ja 90 mm."
+        return (
+            "Lubatud paksused on 1 kuni 12 mm sammuga 1 ning edasi "
+            "15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85 ja 90 mm."
+        )
     if get_sec_per_meter(thickness_mm) is None:
         return "Paksuse vahemik peab olema 1 kuni 90 mm."
     return None
@@ -367,9 +400,15 @@ def build_orientation_result(
             rip_cut_count_partial = max(0, partial_cols - 1)
             cross_cut_count_partial = partial_cols * max(0, partial_rows - 1)
 
-        kerf_area_partial_mm2 = rip_cut_count_partial * raw_length_mm * kerf_mm + cross_cut_count_partial * detail_width_mm * kerf_mm
+        kerf_area_partial_mm2 = (
+            rip_cut_count_partial * raw_length_mm * kerf_mm
+            + cross_cut_count_partial * detail_width_mm * kerf_mm
+        )
 
-    net_detail_area_m2 = (full_pattern_count * net_detail_area_full_mm2 + partial_piece_count * detail_width_mm * detail_length_mm) / 1_000_000.0
+    net_detail_area_m2 = (
+        full_pattern_count * net_detail_area_full_mm2
+        + partial_piece_count * detail_width_mm * detail_length_mm
+    ) / 1_000_000.0
     kerf_area_m2 = (full_pattern_count * kerf_area_full_mm2 + kerf_area_partial_mm2) / 1_000_000.0
     consumed_area_m2 = net_detail_area_m2 + kerf_area_m2
 
@@ -463,6 +502,7 @@ def build_orientation_result(
         "scheme_piece_count": scheme_piece_count,
         "kerf_mm": kerf_mm,
         "warning": warning,
+        "ml_predicted_actual_time_sec": None,
     }
 
 
@@ -478,9 +518,30 @@ def result_sort_key(result):
     )
 
 
+def result_sort_key_ml(result):
+    predicted_time = result.get("ml_predicted_actual_time_sec")
+    if predicted_time is None or pd.isna(predicted_time):
+        predicted_time = result["total_sec"]
+
+    return (
+        result["opened_sheet_count"],
+        result["consumed_area_m2"],
+        -result["usable_offcut_area_m2"],
+        result["non_usable_offcut_area_m2"],
+        predicted_time,
+        result["total_cut_count"],
+        0 if result["blade"]["is_default"] else 1,
+    )
+
+
 def choose_best_result(results):
     valid = [r for r in results if r is not None]
     return min(valid, key=result_sort_key) if valid else None
+
+
+def choose_best_result_ml(results):
+    valid = [r for r in results if r is not None]
+    return min(valid, key=result_sort_key_ml) if valid else None
 
 
 def build_best_result_for_blade(
@@ -527,11 +588,16 @@ def add_blade_reasons(results, best):
         trim_text = "ääretrimmi arvestusega" if r["trim_edges"] else "ilma ääretrimmi arvestuseta"
         prefix = "Soovitatud variant" if r is best else "Alternatiiv"
 
+        ml_text = ""
+        if r.get("ml_predicted_actual_time_sec") is not None:
+            ml_text = f", ML prognoos {sec_to_minsec(r['ml_predicted_actual_time_sec'])}"
+
         r["blade_reason"] = (
             f"{prefix}: {orientation_text}, {trim_text}, avatud plaate {r['opened_sheet_count']} tk, "
             f"detailide pind + saetee kadu {r['consumed_area_m2']:.2f} m², "
             f"kasutatav jääk {r['usable_offcut_area_m2']:.2f} m², "
-            f"mittearvestatav jääk {r['non_usable_offcut_area_m2']:.2f} m², lõikeid kokku {r['total_cut_count']}."
+            f"mittearvestatav jääk {r['non_usable_offcut_area_m2']:.2f} m², "
+            f"lõikeid kokku {r['total_cut_count']}{ml_text}."
         )
 
 
@@ -539,7 +605,10 @@ def offcut_label(offcut):
     if offcut is None:
         return "Puudub"
     usable_text = "kasutatav" if offcut["usable"] else "mittearvestatav"
-    return f"{offcut['name']}: {fmt(offcut['width_mm'])} x {fmt(offcut['length_mm'])} mm, {offcut['area_m2']:.2f} m², {usable_text}"
+    return (
+        f"{offcut['name']}: {fmt(offcut['width_mm'])} x {fmt(offcut['length_mm'])} mm, "
+        f"{offcut['area_m2']:.2f} m², {usable_text}"
+    )
 
 
 def draw_scheme(result):
@@ -598,13 +667,30 @@ def save_history_row(row):
         old = pd.read_csv(HISTORY_FILE)
         df = pd.concat([old, df], ignore_index=True)
     df.to_csv(HISTORY_FILE, index=False)
+    st.cache_resource.clear()
 
 
-def train_ml_model(df):
-    if not SKLEARN_AVAILABLE or df.empty or "actual_time_sec" not in df.columns:
-        return None, None
+def get_onehot_encoder():
+    try:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-    feature_cols = [
+
+@st.cache_resource
+def train_ml_model_cached(csv_path, mtime):
+    if not SKLEARN_AVAILABLE:
+        return None, None, None, 0
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return None, None, None, 0
+
+    if df.empty or "actual_time_sec" not in df.columns:
+        return None, None, None, len(df)
+
+    numeric_features = [
         "thickness_mm",
         "raw_width_mm",
         "raw_length_mm",
@@ -618,21 +704,135 @@ def train_ml_model(df):
         "total_cut_count",
         "kerf_mm",
         "rotated",
+        "trim_edges",
+        "estimated_time_sec",
+        "usable_offcut_m2",
+        "non_usable_offcut_m2",
+        "was_scrap",
+        "rework_time_sec",
     ]
 
-    available = [c for c in feature_cols if c in df.columns]
-    data = df.dropna(subset=available + ["actual_time_sec"]).copy()
+    categorical_features = [
+        "operator",
+        "material",
+        "machine_id",
+        "shift",
+        "blade",
+    ]
 
-    if len(data) < 10:
-        return None, available
+    available_numeric = [c for c in numeric_features if c in df.columns]
+    available_categorical = [c for c in categorical_features if c in df.columns]
 
-    X = data[available].copy()
-    X["rotated"] = X["rotated"].astype(int)
+    data = df.dropna(subset=["actual_time_sec"]).copy()
+    data["actual_time_sec"] = pd.to_numeric(data["actual_time_sec"], errors="coerce")
+    data = data.dropna(subset=["actual_time_sec"])
+
+    if len(data) < ML_MIN_ROWS_TO_TRAIN:
+        return None, available_numeric + available_categorical, None, len(data)
+
+    for col in available_numeric:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    for col in available_categorical:
+        data[col] = data[col].fillna("").astype(str)
+
+    X = data[available_numeric + available_categorical].copy()
     y = data["actual_time_sec"].astype(float)
 
-    model = RandomForestRegressor(n_estimators=200, random_state=42)
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", SimpleImputer(strategy="median"), available_numeric),
+            (
+                "cat",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("onehot", get_onehot_encoder()),
+                    ]
+                ),
+                available_categorical,
+            ),
+        ],
+        remainder="drop",
+    )
+
+    model = Pipeline(
+        [
+            ("preprocess", preprocessor),
+            (
+                "regressor",
+                RandomForestRegressor(
+                    n_estimators=300,
+                    random_state=42,
+                    min_samples_leaf=3,
+                    n_jobs=-1,
+                ),
+            ),
+        ]
+    )
+
+    mae = None
+    if len(data) >= 50:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=0.25,
+            random_state=42,
+        )
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        mae = float(mean_absolute_error(y_test, preds))
+
     model.fit(X, y)
-    return model, available
+
+    return model, available_numeric + available_categorical, mae, len(data)
+
+
+def get_trained_model():
+    if not HISTORY_FILE.exists():
+        return None, None, None, 0
+    mtime = HISTORY_FILE.stat().st_mtime
+    return train_ml_model_cached(str(HISTORY_FILE), mtime)
+
+
+def predict_result_time(model, feature_cols, result, thickness_mm):
+    if model is None or not feature_cols:
+        return None
+
+    ml_row = {
+        "thickness_mm": int(thickness_mm),
+        "raw_width_mm": result["raw_width_mm"],
+        "raw_length_mm": result["raw_length_mm"],
+        "detail_width_mm": result["input_detail_width_mm"],
+        "detail_length_mm": result["input_detail_length_mm"],
+        "detail_count": result["detail_count"],
+        "opened_sheet_count": result["opened_sheet_count"],
+        "pieces_per_sheet": result["pieces_per_sheet"],
+        "rip_cut_count": result["rip_cut_count"],
+        "cross_cut_count": result["cross_cut_count"],
+        "total_cut_count": result["total_cut_count"],
+        "kerf_mm": result["kerf_mm"],
+        "rotated": int(result["rotated"]),
+        "trim_edges": int(result["trim_edges"]),
+        "estimated_time_sec": result["total_sec"],
+        "usable_offcut_m2": result["usable_offcut_area_m2"],
+        "non_usable_offcut_m2": result["non_usable_offcut_area_m2"],
+        "was_scrap": 0,
+        "rework_time_sec": 0.0,
+        "operator": st.session_state.operator,
+        "material": st.session_state.material,
+        "machine_id": st.session_state.machine_id,
+        "shift": st.session_state.shift,
+        "blade": result["blade"]["blade"],
+    }
+
+    X = pd.DataFrame([ml_row])
+    for col in feature_cols:
+        if col not in X.columns:
+            X[col] = None
+    X = X[feature_cols]
+
+    return float(model.predict(X)[0])
 
 
 def render_result_card(result, best_blade_name):
@@ -643,13 +843,14 @@ def render_result_card(result, best_blade_name):
     st.success("Soovitatud variant" if result["blade"]["blade"] == best_blade_name else "Alternatiiv")
     st.subheader(result["blade"]["blade"])
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Avatud plaate", f"{result['opened_sheet_count']} tk")
-    c2.metric("Detailide pind + saetee kadu", f"{result['consumed_area_m2']:.2f} m²")
+    c2.metric("Valemi aeg", sec_to_minsec(result["total_sec"]))
+    c3.metric("ML tegelik aeg", sec_to_minsec(result.get("ml_predicted_actual_time_sec")))
 
-    c3, c4 = st.columns(2)
-    c3.metric("Kasutatav jääk", f"{result['usable_offcut_area_m2']:.2f} m²")
-    c4.metric("Koguaeg", sec_to_minsec(result["total_sec"]))
+    c4, c5 = st.columns(2)
+    c4.metric("Detailide pind + saetee kadu", f"{result['consumed_area_m2']:.2f} m²")
+    c5.metric("Kasutatav jääk", f"{result['usable_offcut_area_m2']:.2f} m²")
 
     st.caption(result["blade_reason"])
 
@@ -667,21 +868,15 @@ def render_result_card(result, best_blade_name):
         ["Osalise plaadi paigutus", f"{result['partial_cols']} veergu x {result['partial_rows']} rida" if result["partial_piece_count"] > 0 else "-"],
         ["Detailide netopind", f"{result['net_detail_area_m2']:.2f} m²"],
         ["Saetee kadu", f"{result['kerf_area_m2']:.2f} m²"],
-        ["Detailide pind + saetee kadu", f"{result['consumed_area_m2']:.2f} m²"],
-        ["Avatud plaatide pind", f"{result['opened_sheet_area_m2']:.2f} m²"],
         ["Teoreetiline jääk", f"{result['theoretical_offcut_area_m2']:.2f} m²"],
-        ["Kasutatav jääk", f"{result['usable_offcut_area_m2']:.2f} m²"],
         ["Mittearvestatav jääk", f"{result['non_usable_offcut_area_m2']:.2f} m²"],
         ["Suurim kasutatav jääk", offcut_label(result["largest_usable_offcut"])],
-        ["Suurim jäägitükk üldse", offcut_label(result["largest_any_offcut"])],
         ["Ribilõikeid", f"{result['rip_cut_count']}"],
         ["Ristlõikeid", f"{result['cross_cut_count']}"],
         ["Lõikeid kokku", f"{result['total_cut_count']}"],
         ["Lõikeaeg", sec_to_minsec(result["cutting_time_sec"])],
         ["Setup aeg", sec_to_minsec(result["setup_sec"])],
         ["Käsitsemisaeg", sec_to_minsec(result["handling_sec"])],
-        ["Käsitsemisaeg / plaat", sec_to_minsec(result["handling_per_sheet_sec"])],
-        ["Õhukese materjali kordaja", f"{result['handling_factor']:.2f}x"],
     ]
     st.table(rows)
 
@@ -694,6 +889,7 @@ def render_result_card(result, best_blade_name):
 
     with st.expander("Jäägid selle variandi puhul"):
         if result["full_offcuts"]:
+            st.write("Täismustriga plaadi jäägid:")
             for offcut in result["full_offcuts"]:
                 st.write(f"- {offcut_label(offcut)}")
         if result["partial_offcuts"]:
@@ -702,8 +898,48 @@ def render_result_card(result, best_blade_name):
                 st.write(f"- {offcut_label(offcut)}")
 
 
+def build_pending_save_row(best_result, actual_time_sec_num, rework_time_sec_num):
+    return {
+        "work_id": datetime.now().strftime("%Y%m%d%H%M%S"),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "order_id": st.session_state.order_id,
+        "operator": st.session_state.operator,
+        "material": st.session_state.material,
+        "machine_id": st.session_state.machine_id,
+        "shift": st.session_state.shift,
+        "thickness_mm": int(st.session_state.thickness_mm),
+        "raw_width_mm": best_result["raw_width_mm"],
+        "raw_length_mm": best_result["raw_length_mm"],
+        "detail_width_mm": best_result["input_detail_width_mm"],
+        "detail_length_mm": best_result["input_detail_length_mm"],
+        "detail_count": int(best_result["detail_count"]),
+        "calculator_recommended_blade": best_result["blade"]["blade"],
+        "calculator_recommended_rotated": int(best_result["rotated"]),
+        "actual_blade": best_result["blade"]["blade"],
+        "actual_rotated": int(best_result["rotated"]),
+        "operator_changed_recommendation": 0,
+        "blade": best_result["blade"]["blade"],
+        "rotated": int(best_result["rotated"]),
+        "trim_edges": int(best_result["trim_edges"]),
+        "opened_sheet_count": best_result["opened_sheet_count"],
+        "pieces_per_sheet": best_result["pieces_per_sheet"],
+        "rip_cut_count": best_result["rip_cut_count"],
+        "cross_cut_count": best_result["cross_cut_count"],
+        "total_cut_count": best_result["total_cut_count"],
+        "kerf_mm": best_result["kerf_mm"],
+        "estimated_time_sec": best_result["total_sec"],
+        "actual_time_sec": actual_time_sec_num,
+        "usable_offcut_m2": best_result["usable_offcut_area_m2"],
+        "non_usable_offcut_m2": best_result["non_usable_offcut_area_m2"],
+        "was_scrap": int(st.session_state.was_scrap),
+        "scrap_reason": st.session_state.scrap_reason,
+        "rework_time_sec": rework_time_sec_num,
+        "ml_predicted_actual_time_sec": best_result.get("ml_predicted_actual_time_sec"),
+    }
+
+
 st.title("🪚 Saetöö kalkulaator")
-st.caption("Kalkulaator ja töölogi on eraldi. Logi salvestub automaatselt pärast arvutust, kui tegelik aeg on sisestatud.")
+st.caption("Arvutus + töölogi + ajalugu + ML. Ajalukku salvestamine toimub käsitsi pärast arvutust.")
 
 top1, top2 = st.columns([5, 1])
 with top2:
@@ -720,33 +956,36 @@ with tab_worklog:
         wl1, wl2 = st.columns(2)
 
         with wl1:
+            order_id = st.text_input("Tellimuse / töö number", value=st.session_state.order_id, placeholder="Nt T-240426-01")
             operator = st.text_input("Operaator", value=st.session_state.operator, placeholder="Nimi")
-            material = st.text_input("Materjal", value=st.session_state.material, placeholder="Nt melamiin")
-            machine_id = st.text_input("Masin", value=st.session_state.machine_id, placeholder="Nt Biesse 1")
+            material = st.text_input("Materjal", value=st.session_state.material, placeholder="Nt PE1000")
+            machine_id = st.text_input("Masin", value=st.session_state.machine_id, placeholder="Nt Saag-1")
 
         with wl2:
             shift = st.text_input("Vahetus", value=st.session_state.shift, placeholder="Nt hommik")
-            actual_time_sec = st.text_input(
-                "Tegelik tööaeg sekundites",
-                value=st.session_state.actual_time_sec,
-                placeholder="Nt 1200",
-            )
+            actual_time_min = st.text_input("Tegelik tööaeg minutites", value=st.session_state.actual_time_min, placeholder="Nt 20")
+            was_scrap = st.checkbox("Tekkis praak / ümbertöö", value=st.session_state.was_scrap)
+            scrap_reason = st.text_input("Praagi põhjus", value=st.session_state.scrap_reason, placeholder="Nt mõõduviga")
+            rework_time_min = st.text_input("Ümbertöö aeg minutites", value=st.session_state.rework_time_min, placeholder="Nt 5")
 
         save_worklog = st.form_submit_button("Uuenda tööandmed", use_container_width=True)
 
     if save_worklog:
+        st.session_state.order_id = order_id
         st.session_state.operator = operator
         st.session_state.material = material
         st.session_state.machine_id = machine_id
         st.session_state.shift = shift
-        st.session_state.actual_time_sec = actual_time_sec
-        st.success("Tööandmed uuendatud. Järgmise arvutuse järel salvestub logi automaatselt.")
+        st.session_state.actual_time_min = actual_time_min
+        st.session_state.was_scrap = was_scrap
+        st.session_state.scrap_reason = scrap_reason
+        st.session_state.rework_time_min = rework_time_min
+        st.session_state.pending_save_row = None
+        st.success("Tööandmed uuendatud.")
 
     if st.button("Tühjenda töölogi väljad", use_container_width=True):
         clear_worklog_inputs()
         st.rerun()
-
-    st.info("Kui tegelik tööaeg on täidetud, salvestatakse töö automaatselt ajalukku pärast kalkulaatori arvutust.")
 
 with tab_history:
     st.subheader("Ajalugu")
@@ -755,7 +994,7 @@ with tab_history:
     if uploaded is not None:
         try:
             st.session_state.history_df = pd.read_csv(uploaded)
-            st.success("Ajalugu laaditud.")
+            st.success("Ajalugu laaditud sessiooni vaatamiseks.")
         except Exception:
             st.error("CSV laadimine ebaõnnestus.")
 
@@ -763,19 +1002,55 @@ with tab_history:
     st.write(f"Ajaloo ridu: {len(history_df)}")
 
     if not history_df.empty:
-        st.dataframe(history_df.tail(20), use_container_width=True)
+        st.dataframe(history_df.tail(30), use_container_width=True)
+        st.download_button(
+            "Laadi ajalugu alla CSV-na",
+            data=history_df.to_csv(index=False).encode("utf-8"),
+            file_name="saetoo_ajalugu.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 with tab_ml:
     st.subheader("ML prognoos")
 
-    history_df = st.session_state.history_df if not st.session_state.history_df.empty else load_history()
-    model, feature_cols = train_ml_model(history_df)
+    model, feature_cols, mae, n_rows = get_trained_model()
 
-    if model is None:
-        st.info("ML mudelit pole veel võimalik treenida. Vaja on piisavalt ridu veeruga actual_time_sec.")
+    if not SKLEARN_AVAILABLE:
+        st.error("scikit-learn ei ole paigaldatud. Paigalda: pip install scikit-learn")
+    elif model is None:
+        st.info(f"ML mudelit pole veel võimalik kasutada. Õpperidu: {n_rows}. Vajalik vähemalt {ML_MIN_ROWS_TO_TRAIN}.")
     else:
-        st.success("ML mudel on treenitud.")
+        st.success(f"ML mudel on treenitud. Õpperidu: {n_rows}.")
         st.write("Kasutatud tunnused:", ", ".join(feature_cols))
+        if mae is not None:
+            st.metric("Mudeli keskmine viga (MAE)", sec_to_minsec(mae))
+        else:
+            st.info("MAE kuvatakse siis, kui ridu on vähemalt 50.")
+
+        if n_rows >= ML_MIN_ROWS_TO_DECIDE and (mae is None or mae <= ML_MAX_ACCEPTABLE_MAE_SEC):
+            st.success("ML võib osaleda soovituse valikus.")
+        else:
+            st.warning("ML prognoosi kuvatakse, kuid otsuse valik jääb reeglipõhiseks.")
+
+    history_for_plot = load_history()
+    if not history_for_plot.empty and {"estimated_time_sec", "actual_time_sec"}.issubset(history_for_plot.columns):
+        plot_df = history_for_plot.copy()
+        plot_df["estimated_time_sec"] = pd.to_numeric(plot_df["estimated_time_sec"], errors="coerce")
+        plot_df["actual_time_sec"] = pd.to_numeric(plot_df["actual_time_sec"], errors="coerce")
+        plot_df = plot_df.dropna(subset=["estimated_time_sec", "actual_time_sec"])
+
+        if not plot_df.empty:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.scatter(plot_df["estimated_time_sec"] / 60, plot_df["actual_time_sec"] / 60, alpha=0.65)
+            lim = max(plot_df["estimated_time_sec"].max(), plot_df["actual_time_sec"].max()) / 60
+            ax.plot([0, lim], [0, lim])
+            ax.set_title("Valemiga arvutatud aeg vs tegelik aeg")
+            ax.set_xlabel("Valemiga aeg, min")
+            ax.set_ylabel("Tegelik aeg, min")
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+            plt.close(fig)
 
 with tab_calc:
     with st.form("calc_form", enter_to_submit=False):
@@ -798,23 +1073,19 @@ with tab_calc:
             detail_length_mm = st.text_input("Detaili pikkus mm", value=st.session_state.detail_length_mm, placeholder="Nt 300")
 
         detail_count = st.text_input("Detailide arv", value=st.session_state.detail_count, placeholder="Nt 20")
-
-        trim_edges = st.checkbox(
-            "Arvesta ääretrimmi / väliste eralduslõigetega",
-            value=st.session_state.trim_edges,
-        )
+        trim_edges = st.checkbox("Arvesta ääretrimmi / väliste eralduslõigetega", value=st.session_state.trim_edges)
 
         submitted = st.form_submit_button("Arvuta", use_container_width=True)
 
-    if not submitted:
+    if not submitted and not st.session_state.pending_save_row:
         st.info("Sisesta andmed ja vajuta Arvuta.")
 
     if submitted:
         try:
-            raw_width_mm = float(str(raw_width_mm).replace(",", ".").strip())
-            raw_length_mm = float(str(raw_length_mm).replace(",", ".").strip())
-            detail_width_mm = float(str(detail_width_mm).replace(",", ".").strip())
-            detail_length_mm = float(str(detail_length_mm).replace(",", ".").strip())
+            raw_width_mm = parse_float_text(raw_width_mm)
+            raw_length_mm = parse_float_text(raw_length_mm)
+            detail_width_mm = parse_float_text(detail_width_mm)
+            detail_length_mm = parse_float_text(detail_length_mm)
             detail_count = int(str(detail_count).strip())
         except ValueError:
             st.error("Palun sisesta kõik kalkulaatori väljad korrektselt numbritena.")
@@ -827,6 +1098,7 @@ with tab_calc:
         st.session_state.detail_length_mm = str(detail_length_mm)
         st.session_state.detail_count = str(detail_count)
         st.session_state.trim_edges = bool(trim_edges)
+        st.session_state.pending_save_row = None
 
         error = validate_common(
             int(thickness_mm),
@@ -854,7 +1126,27 @@ with tab_calc:
             for blade in BLADES
         ]
 
-        best_result = choose_best_result(results)
+        model, feature_cols, mae, n_rows = get_trained_model()
+
+        if model is not None:
+            for r in results:
+                if r is not None:
+                    r["ml_predicted_actual_time_sec"] = predict_result_time(
+                        model, feature_cols, r, thickness_mm
+                    )
+
+        ml_can_decide = (
+            model is not None
+            and n_rows >= ML_MIN_ROWS_TO_DECIDE
+            and (mae is None or mae <= ML_MAX_ACCEPTABLE_MAE_SEC)
+        )
+
+        if ml_can_decide:
+            best_result = choose_best_result_ml(results)
+            decision_mode = "ML-toega soovitus"
+        else:
+            best_result = choose_best_result(results)
+            decision_mode = "Reeglipõhine soovitus"
 
         if best_result is None:
             st.error("Detail ei mahu antud toorikusse või ketta max paksus ei luba kummagi variandi kasutamist.")
@@ -864,81 +1156,23 @@ with tab_calc:
         st.session_state.last_results = results
         st.session_state.best_result = best_result
 
-        operator = st.session_state.operator
-        material = st.session_state.material
-        machine_id = st.session_state.machine_id
-        shift = st.session_state.shift
-        actual_time_sec = st.session_state.actual_time_sec
-
-        actual_time_sec_num = None
-        if str(actual_time_sec).strip():
-            try:
-                actual_time_sec_num = float(str(actual_time_sec).replace(",", ".").strip())
-            except ValueError:
-                st.warning("Tehtud töö tabis sisestatud tegelik tööaeg ei ole korrektne number. Ajalukku seda ei salvestatud.")
-
-        if actual_time_sec_num is not None:
-            save_history_row(
-                {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "operator": operator,
-                    "material": material,
-                    "machine_id": machine_id,
-                    "shift": shift,
-                    "thickness_mm": int(thickness_mm),
-                    "raw_width_mm": raw_width_mm,
-                    "raw_length_mm": raw_length_mm,
-                    "detail_width_mm": detail_width_mm,
-                    "detail_length_mm": detail_length_mm,
-                    "detail_count": int(detail_count),
-                    "blade": best_result["blade"]["blade"],
-                    "rotated": int(best_result["rotated"]),
-                    "trim_edges": int(best_result["trim_edges"]),
-                    "opened_sheet_count": best_result["opened_sheet_count"],
-                    "pieces_per_sheet": best_result["pieces_per_sheet"],
-                    "rip_cut_count": best_result["rip_cut_count"],
-                    "cross_cut_count": best_result["cross_cut_count"],
-                    "total_cut_count": best_result["total_cut_count"],
-                    "estimated_time_sec": best_result["total_sec"],
-                    "actual_time_sec": actual_time_sec_num,
-                    "usable_offcut_m2": best_result["usable_offcut_area_m2"],
-                    "non_usable_offcut_m2": best_result["non_usable_offcut_area_m2"],
-                }
-            )
-            st.success("Töö logi salvestati automaatselt ajalukku.")
-
         st.success(
-            f"Soovitus: {best_result['blade']['blade']} | avatud plaate {best_result['opened_sheet_count']} tk | "
-            f"detailide pind + saetee kadu {best_result['consumed_area_m2']:.2f} m² | "
-            f"kasutatav jääk {best_result['usable_offcut_area_m2']:.2f} m² | "
-            f"mittearvestatav jääk {best_result['non_usable_offcut_area_m2']:.2f} m² | "
-            f"koguaeg {sec_to_minsec(best_result['total_sec'])}."
+            f"{decision_mode}: {best_result['blade']['blade']} | avatud plaate {best_result['opened_sheet_count']} tk | "
+            f"valemi aeg {sec_to_minsec(best_result['total_sec'])}"
+            + (
+                f" | ML aeg {sec_to_minsec(best_result['ml_predicted_actual_time_sec'])}"
+                if best_result.get("ml_predicted_actual_time_sec") is not None
+                else ""
+            )
         )
 
-        history_df = st.session_state.history_df if not st.session_state.history_df.empty else load_history()
-        if SKLEARN_AVAILABLE and not history_df.empty:
-            model, feature_cols = train_ml_model(history_df)
-            if model is not None:
-                ml_row = {
-                    "thickness_mm": int(thickness_mm),
-                    "raw_width_mm": raw_width_mm,
-                    "raw_length_mm": raw_length_mm,
-                    "detail_width_mm": detail_width_mm,
-                    "detail_length_mm": detail_length_mm,
-                    "detail_count": int(detail_count),
-                    "opened_sheet_count": best_result["opened_sheet_count"],
-                    "pieces_per_sheet": best_result["pieces_per_sheet"],
-                    "rip_cut_count": best_result["rip_cut_count"],
-                    "cross_cut_count": best_result["cross_cut_count"],
-                    "total_cut_count": best_result["total_cut_count"],
-                    "kerf_mm": best_result["kerf_mm"],
-                    "rotated": int(best_result["rotated"]),
-                }
-                X = pd.DataFrame([ml_row])[feature_cols]
-                X["rotated"] = X["rotated"].astype(int)
-                predicted_actual_time = model.predict(X)[0]
-                st.metric("ML prognoositud tegelik aeg", sec_to_minsec(predicted_actual_time))
-                st.metric("Valemiga arvutatud aeg", sec_to_minsec(best_result["total_sec"]))
+        if model is not None:
+            if mae is not None:
+                st.info(f"ML info: õpperidu {n_rows}, MAE {sec_to_minsec(mae)}.")
+            else:
+                st.info(f"ML treenitud, kuid MAE veel puudub. Õpperidu {n_rows}.")
+        else:
+            st.info(f"ML ei ole veel aktiivne. Õpperidu {n_rows}, vajalik vähemalt {ML_MIN_ROWS_TO_TRAIN}.")
 
         left, right = st.columns(2)
         with left:
@@ -946,21 +1180,49 @@ with tab_calc:
         with right:
             render_result_card(results[1], best_result["blade"]["blade"])
 
+        actual_time_sec_num = None
+        rework_time_sec_num = 0.0
+
+        if str(st.session_state.actual_time_min).strip():
+            try:
+                actual_time_sec_num = parse_float_text(st.session_state.actual_time_min) * 60
+            except ValueError:
+                st.warning("Tegelik tööaeg minutites ei ole korrektne number.")
+
+        if str(st.session_state.rework_time_min).strip():
+            try:
+                rework_time_sec_num = parse_float_text(st.session_state.rework_time_min) * 60
+            except ValueError:
+                st.warning("Ümbertöö aeg minutites ei ole korrektne number. Kasutatakse 0.")
+                rework_time_sec_num = 0.0
+
+        if actual_time_sec_num is not None:
+            st.session_state.pending_save_row = build_pending_save_row(
+                best_result,
+                actual_time_sec_num,
+                rework_time_sec_num,
+            )
+
         with st.expander("Arvestuse loogika"):
-            st.write("- Detail arvutatakse läbi kahes orientatsioonis: sisestatud asendis ja pööratult.")
-            st.write("- Iga ketta puhul valitakse kõigepealt parem orientatsioon.")
-            st.write("- Seejärel võrreldakse 5.6 mm ja 3.1 mm ketta parimaid variante.")
-            st.write("- Kui paksus ületab ketta lubatud max paksuse, siis seda varianti ei arvestata.")
-            st.write("- Detailide pind + saetee kadu = detailide netopind + saetera lõikejälje pind.")
-            st.write("- Avatud plaatide pind näitab, kui palju plaate tuleb tööks avada.")
-            st.write("- Teoreetiline jääk = avatud plaatide pind - detailide netopind - saetee kadu.")
-            st.write(f"- Kasutatav jääk peab olema vähemalt {int(MIN_USABLE_OFFCUT_WIDTH_MM)} mm kitsamast küljest ja {int(MIN_USABLE_OFFCUT_LENGTH_MM)} mm pikemast küljest.")
-            st.write(f"- Lisaks peab kasutatava jäägi pind olema vähemalt {MIN_USABLE_OFFCUT_AREA_M2:.2f} m².")
-            st.write("- Näiteks 3000 x 100 mm riba on mittearvestatav jääk, sest kitsam külg on alla 150 mm.")
-            st.write("- Mittearvestatav jääk on teoreetiline jääk, millest on maha võetud kasutatav jääk.")
-            st.write("- Lõikeskeem näitab arvutuses kasutatud ala, mitte alati tervet plaati.")
-            st.write("- Viimane osaline plaat optimeeritakse erinevate veeru-rea kombinatsioonide vahel, et saada parem jääk.")
-            st.write("- Ääretrimmi saab vajadusel sisse või välja lülitada.")
-            st.write("- Käsitsemisaeg sõltub nii plaatide arvust kui ka plaadi pindalast.")
-            st.write("- Alla 10 mm materjalil kasutatakse käsitsemisaja kordajat 0.33x.")
-            st.write("- Koguaeg = lõikeaeg + setup aeg + käsitsemisaeg.")
+            st.write("- Mõlemale kettale arvutatakse parim orientatsioon.")
+            st.write("- Kui ML mudel on piisavalt treenitud ja vea tase on mõistlik, kasutatakse valikul ML prognoosi.")
+            st.write("- Kui ML pole veel usaldusväärne, kasutatakse reeglipõhist valikut.")
+            st.write("- Tegelik töö salvestatakse alles käsitsi nupuga, et vältida topeltsalvestust.")
+            st.write("- Tegelik aeg sisestatakse minutites, aga ajalukku salvestatakse sekundites.")
+            st.write("- Kasutatav jääk peab olema vähemalt 150 mm kitsamast küljest ja 1000 mm pikemast küljest ning vähemalt 0.15 m².")
+
+    if st.session_state.pending_save_row is not None:
+        st.subheader("Tehtud töö salvestus")
+        st.write(
+            f"Valmis salvestamiseks: töö/tellimus "
+            f"**{st.session_state.pending_save_row.get('order_id') or st.session_state.pending_save_row.get('work_id')}**, "
+            f"tegelik aeg {sec_to_minsec(st.session_state.pending_save_row['actual_time_sec'])}."
+        )
+        if st.button("Salvesta tehtud töö ajalukku", use_container_width=True):
+            save_history_row(st.session_state.pending_save_row)
+            st.session_state.pending_save_row = None
+            st.success("Töö salvestati ajalukku.")
+            st.rerun()
+    elif submitted:
+        st.subheader("Tehtud töö salvestus")
+        st.warning("Ajalukku salvestamiseks sisesta 'Tehtud töö' tabis tegelik tööaeg minutites ja arvuta uuesti.")
