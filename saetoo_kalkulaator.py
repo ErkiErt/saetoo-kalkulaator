@@ -26,6 +26,7 @@ st.set_page_config(page_title="Saetöö kalkulaator", page_icon="🪚", layout="
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 HISTORY_FILE = DATA_DIR / "saetoo_ajalugu.csv"
+UPLOADED_HISTORY_FILE = DATA_DIR / "uploaded_history_session.csv"
 
 MAX_LENGTH_MM = 3050.0
 MAX_WIDTH_MM = 2050.0
@@ -94,6 +95,13 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
+def safe_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
 
 
 def clear_calc_inputs():
@@ -722,13 +730,17 @@ def train_ml_model_cached(csv_path, mtime):
 
     available_numeric = [c for c in numeric_features if c in df.columns]
     available_categorical = [c for c in categorical_features if c in df.columns]
+    feature_cols = available_numeric + available_categorical
 
     data = df.dropna(subset=["actual_time_sec"]).copy()
     data["actual_time_sec"] = pd.to_numeric(data["actual_time_sec"], errors="coerce")
     data = data.dropna(subset=["actual_time_sec"])
 
     if len(data) < ML_MIN_ROWS_TO_TRAIN:
-        return None, available_numeric + available_categorical, None, len(data)
+        return None, feature_cols, None, len(data)
+
+    if not feature_cols:
+        return None, feature_cols, None, len(data)
 
     for col in available_numeric:
         data[col] = pd.to_numeric(data[col], errors="coerce")
@@ -736,7 +748,7 @@ def train_ml_model_cached(csv_path, mtime):
     for col in available_categorical:
         data[col] = data[col].fillna("").astype(str)
 
-    X = data[available_numeric + available_categorical].copy()
+    X = data[feature_cols].copy()
     y = data["actual_time_sec"].astype(float)
 
     preprocessor = ColumnTransformer(
@@ -785,12 +797,18 @@ def train_ml_model_cached(csv_path, mtime):
 
     model.fit(X, y)
 
-    return model, available_numeric + available_categorical, mae, len(data)
+    return model, feature_cols, mae, len(data)
 
 
 def get_trained_model():
+    if not st.session_state.history_df.empty:
+        st.session_state.history_df.to_csv(UPLOADED_HISTORY_FILE, index=False)
+        mtime = UPLOADED_HISTORY_FILE.stat().st_mtime
+        return train_ml_model_cached(str(UPLOADED_HISTORY_FILE), mtime)
+
     if not HISTORY_FILE.exists():
         return None, None, None, 0
+
     mtime = HISTORY_FILE.stat().st_mtime
     return train_ml_model_cached(str(HISTORY_FILE), mtime)
 
@@ -945,47 +963,26 @@ top1, top2 = st.columns([5, 1])
 with top2:
     if st.button("Tühjenda kalkulaatori väljad", use_container_width=True):
         clear_calc_inputs()
-        st.rerun()
+        safe_rerun()
 
 tab_calc, tab_worklog, tab_history, tab_ml = st.tabs(["Kalkulaator", "Tehtud töö", "Ajalugu", "ML"])
 
 with tab_worklog:
     st.subheader("Tehtud töö andmed")
 
-    with st.form("worklog_form", enter_to_submit=False):
-        wl1, wl2 = st.columns(2)
-
-        with wl1:
-            order_id = st.text_input("Tellimuse / töö number", value=st.session_state.order_id, placeholder="Nt T-240426-01")
-            operator = st.text_input("Operaator", value=st.session_state.operator, placeholder="Nimi")
-            material = st.text_input("Materjal", value=st.session_state.material, placeholder="Nt PE1000")
-            machine_id = st.text_input("Masin", value=st.session_state.machine_id, placeholder="Nt Saag-1")
-
-        with wl2:
-            shift = st.text_input("Vahetus", value=st.session_state.shift, placeholder="Nt hommik")
-            actual_time_min = st.text_input("Tegelik tööaeg minutites", value=st.session_state.actual_time_min, placeholder="Nt 20")
-            was_scrap = st.checkbox("Tekkis praak / ümbertöö", value=st.session_state.was_scrap)
-            scrap_reason = st.text_input("Praagi põhjus", value=st.session_state.scrap_reason, placeholder="Nt mõõduviga")
-            rework_time_min = st.text_input("Ümbertöö aeg minutites", value=st.session_state.rework_time_min, placeholder="Nt 5")
-
-        save_worklog = st.form_submit_button("Uuenda tööandmed", use_container_width=True)
-
-    if save_worklog:
-        st.session_state.order_id = order_id
-        st.session_state.operator = operator
-        st.session_state.material = material
-        st.session_state.machine_id = machine_id
-        st.session_state.shift = shift
-        st.session_state.actual_time_min = actual_time_min
-        st.session_state.was_scrap = was_scrap
-        st.session_state.scrap_reason = scrap_reason
-        st.session_state.rework_time_min = rework_time_min
-        st.session_state.pending_save_row = None
-        st.success("Tööandmed uuendatud.")
+    st.text_input("Tellimuse / töö number", key="order_id", placeholder="Nt T-240426-01")
+    st.text_input("Operaator", key="operator", placeholder="Nimi")
+    st.text_input("Materjal", key="material", placeholder="Nt PE1000")
+    st.text_input("Masin", key="machine_id", placeholder="Nt Saag-1")
+    st.text_input("Vahetus", key="shift", placeholder="Nt hommik")
+    st.text_input("Tegelik tööaeg minutites", key="actual_time_min", placeholder="Nt 20")
+    st.checkbox("Tekkis praak / ümbertöö", key="was_scrap")
+    st.text_input("Praagi põhjus", key="scrap_reason", placeholder="Nt mõõduviga")
+    st.text_input("Ümbertöö aeg minutites", key="rework_time_min", placeholder="Nt 5")
 
     if st.button("Tühjenda töölogi väljad", use_container_width=True):
         clear_worklog_inputs()
-        st.rerun()
+        safe_rerun()
 
 with tab_history:
     st.subheader("Ajalugu")
@@ -994,7 +991,7 @@ with tab_history:
     if uploaded is not None:
         try:
             st.session_state.history_df = pd.read_csv(uploaded)
-            st.success("Ajalugu laaditud sessiooni vaatamiseks.")
+            st.success("Ajalugu laaditud sessiooni vaatamiseks ja ML kasutuseks.")
         except Exception:
             st.error("CSV laadimine ebaõnnestus.")
 
@@ -1022,7 +1019,7 @@ with tab_ml:
         st.info(f"ML mudelit pole veel võimalik kasutada. Õpperidu: {n_rows}. Vajalik vähemalt {ML_MIN_ROWS_TO_TRAIN}.")
     else:
         st.success(f"ML mudel on treenitud. Õpperidu: {n_rows}.")
-        st.write("Kasutatud tunnused:", ", ".join(feature_cols))
+        st.write("Kasutatud tunnused:", ", ".join(feature_cols) if feature_cols else "-")
         if mae is not None:
             st.metric("Mudeli keskmine viga (MAE)", sec_to_minsec(mae))
         else:
@@ -1033,7 +1030,7 @@ with tab_ml:
         else:
             st.warning("ML prognoosi kuvatakse, kuid otsuse valik jääb reeglipõhiseks.")
 
-    history_for_plot = load_history()
+    history_for_plot = st.session_state.history_df if not st.session_state.history_df.empty else load_history()
     if not history_for_plot.empty and {"estimated_time_sec", "actual_time_sec"}.issubset(history_for_plot.columns):
         plot_df = history_for_plot.copy()
         plot_df["estimated_time_sec"] = pd.to_numeric(plot_df["estimated_time_sec"], errors="coerce")
@@ -1222,7 +1219,7 @@ with tab_calc:
             save_history_row(st.session_state.pending_save_row)
             st.session_state.pending_save_row = None
             st.success("Töö salvestati ajalukku.")
-            st.rerun()
+            safe_rerun()
     elif submitted:
         st.subheader("Tehtud töö salvestus")
         st.warning("Ajalukku salvestamiseks sisesta 'Tehtud töö' tabis tegelik tööaeg minutites ja arvuta uuesti.")
