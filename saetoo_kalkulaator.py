@@ -302,7 +302,14 @@ def build_orientation_result(blade, thickness_mm, raw_width_mm, raw_length_mm, i
 
     if partial_piece_count > 0:
         partial_layout = build_partial_layout_options(
-            partial_piece_count, across, along, detail_width_mm, detail_length_mm, kerf_mm, raw_width_mm, raw_length_mm
+            partial_piece_count,
+            across,
+            along,
+            detail_width_mm,
+            detail_length_mm,
+            kerf_mm,
+            raw_width_mm,
+            raw_length_mm,
         )
         if partial_layout is None:
             return None
@@ -331,11 +338,9 @@ def build_orientation_result(blade, thickness_mm, raw_width_mm, raw_length_mm, i
     theoretical_offcut_area_m2 = max(0.0, opened_sheet_area_m2 - consumed_area_m2)
 
     full_offcuts = get_simple_offcuts(raw_width_mm, raw_length_mm, full_used_width_mm, full_used_length_mm)
-
     usable_offcut_area_m2, largest_usable_offcut, largest_any_offcut = summarize_offcuts(
         full_offcuts, partial_offcuts, full_pattern_count, partial_pattern_count
     )
-
     non_usable_offcut_area_m2 = max(0.0, theoretical_offcut_area_m2 - usable_offcut_area_m2)
 
     if partial_piece_count > 0:
@@ -356,7 +361,6 @@ def build_orientation_result(blade, thickness_mm, raw_width_mm, raw_length_mm, i
     cutting_time_sec = rip_time_sec + cross_time_sec
 
     setup_sec = BASE_SETUP_SEC + blade_switch_setup_sec(blade)
-
     handling_per_sheet_sec = BASE_HANDLING_PER_SHEET_SEC + sheet_area_m2 * HANDLING_PER_M2_SEC
     handling_factor = THIN_MATERIAL_HANDLING_FACTOR if thickness_mm < 10 else 1.0
     handling_sec = (
@@ -434,8 +438,28 @@ def choose_best_result(results):
 
 
 def build_best_result_for_blade(blade, thickness_mm, raw_width_mm, raw_length_mm, detail_width_mm, detail_length_mm, detail_count, trim_edges):
-    normal = build_orientation_result(blade, thickness_mm, raw_width_mm, raw_length_mm, detail_width_mm, detail_length_mm, detail_count, trim_edges, False)
-    rotated = build_orientation_result(blade, thickness_mm, raw_width_mm, raw_length_mm, detail_width_mm, detail_length_mm, detail_count, trim_edges, True)
+    normal = build_orientation_result(
+        blade,
+        thickness_mm,
+        raw_width_mm,
+        raw_length_mm,
+        detail_width_mm,
+        detail_length_mm,
+        detail_count,
+        trim_edges,
+        False,
+    )
+    rotated = build_orientation_result(
+        blade,
+        thickness_mm,
+        raw_width_mm,
+        raw_length_mm,
+        detail_width_mm,
+        detail_length_mm,
+        detail_count,
+        trim_edges,
+        True,
+    )
     return choose_best_result([normal, rotated])
 
 
@@ -573,7 +597,7 @@ def render_result_card(result, best_blade_name):
         ["Täismustriga plaate", f"{result['full_pattern_count']} tk"],
         ["Osalisi plaate", f"{result['partial_pattern_count']} tk"],
         ["Viimasel osalisel plaadil", f"{result['partial_piece_count']} detaili"],
-        ["Osalise plaadi paigutus", f"{result['partial_cols']} veergu x {result['partial_rows']} rida" if result['partial_piece_count'] > 0 else "-"],
+        ["Osalise plaadi paigutus", f"{result['partial_cols']} veergu x {result['partial_rows']} rida" if result["partial_piece_count"] > 0 else "-"],
         ["Detailide netopind", f"{result['net_detail_area_m2']:.2f} m²"],
         ["Saetee kadu", f"{result['kerf_area_m2']:.2f} m²"],
         ["Detailide pind + saetee kadu", f"{result['consumed_area_m2']:.2f} m²"],
