@@ -703,7 +703,7 @@ def render_result_card(result, best_blade_name):
 
 
 st.title("🪚 Saetöö kalkulaator")
-st.caption("Kalkulaator, tehtud töö, ajalugu ja ML on eraldi tabides.")
+st.caption("Kalkulaator ja töölogi on eraldi. Logi salvestub automaatselt pärast arvutust, kui tegelik aeg on sisestatud.")
 
 top1, top2 = st.columns([5, 1])
 with top2:
@@ -714,39 +714,43 @@ with top2:
 tab_calc, tab_worklog, tab_history, tab_ml = st.tabs(["Kalkulaator", "Tehtud töö", "Ajalugu", "ML"])
 
 with tab_worklog:
-    st.subheader("Tehtud töö sisestus")
+    st.subheader("Tehtud töö andmed")
 
-    wl1, wl2 = st.columns(2)
-    with wl1:
-        operator = st.text_input("Operaator", value=st.session_state.operator, placeholder="Nimi")
-        material = st.text_input("Materjal", value=st.session_state.material, placeholder="Nt melamiin")
-        machine_id = st.text_input("Masin", value=st.session_state.machine_id, placeholder="Nt Biesse 1")
-    with wl2:
-        shift = st.text_input("Vahetus", value=st.session_state.shift, placeholder="Nt hommik")
-        actual_time_sec = st.text_input(
-            "Tegelik tööaeg sekundites",
-            value=st.session_state.actual_time_sec,
-            placeholder="Nt 1200",
-        )
+    with st.form("worklog_form", enter_to_submit=False):
+        wl1, wl2 = st.columns(2)
 
-    w1, w2 = st.columns(2)
-    with w1:
-        if st.button("Salvesta tehtud töö andmed", use_container_width=True):
-            st.session_state.operator = operator
-            st.session_state.material = material
-            st.session_state.machine_id = machine_id
-            st.session_state.shift = shift
-            st.session_state.actual_time_sec = actual_time_sec
-            st.success("Tehtud töö andmed salvestatud sessiooni.")
-    with w2:
-        if st.button("Tühjenda tehtud töö väljad", use_container_width=True):
-            clear_worklog_inputs()
-            st.rerun()
+        with wl1:
+            operator = st.text_input("Operaator", value=st.session_state.operator, placeholder="Nimi")
+            material = st.text_input("Materjal", value=st.session_state.material, placeholder="Nt melamiin")
+            machine_id = st.text_input("Masin", value=st.session_state.machine_id, placeholder="Nt Biesse 1")
 
-    st.info("Neid andmeid kasutatakse ajaloo salvestamisel siis, kui sisestad kalkulaatoris uue töö ja tegelik tööaeg on täidetud.")
+        with wl2:
+            shift = st.text_input("Vahetus", value=st.session_state.shift, placeholder="Nt hommik")
+            actual_time_sec = st.text_input(
+                "Tegelik tööaeg sekundites",
+                value=st.session_state.actual_time_sec,
+                placeholder="Nt 1200",
+            )
+
+        save_worklog = st.form_submit_button("Uuenda tööandmed", use_container_width=True)
+
+    if save_worklog:
+        st.session_state.operator = operator
+        st.session_state.material = material
+        st.session_state.machine_id = machine_id
+        st.session_state.shift = shift
+        st.session_state.actual_time_sec = actual_time_sec
+        st.success("Tööandmed uuendatud. Järgmise arvutuse järel salvestub logi automaatselt.")
+
+    if st.button("Tühjenda töölogi väljad", use_container_width=True):
+        clear_worklog_inputs()
+        st.rerun()
+
+    st.info("Kui tegelik tööaeg on täidetud, salvestatakse töö automaatselt ajalukku pärast kalkulaatori arvutust.")
 
 with tab_history:
     st.subheader("Ajalugu")
+
     uploaded = st.file_uploader("Laadi ajaloo CSV", type=["csv"], key="history_upload")
     if uploaded is not None:
         try:
@@ -783,37 +787,17 @@ with tab_calc:
                 index=THICKNESS_OPTIONS_MM.index(int(st.session_state.thickness_mm)),
             )
         with col2:
-            raw_width_mm = st.text_input(
-                "Tooriku laius mm",
-                value=st.session_state.raw_width_mm,
-                placeholder="Nt 1000",
-            )
+            raw_width_mm = st.text_input("Tooriku laius mm", value=st.session_state.raw_width_mm, placeholder="Nt 1000")
         with col3:
-            raw_length_mm = st.text_input(
-                "Tooriku pikkus mm",
-                value=st.session_state.raw_length_mm,
-                placeholder="Nt 2000",
-            )
+            raw_length_mm = st.text_input("Tooriku pikkus mm", value=st.session_state.raw_length_mm, placeholder="Nt 2000")
 
         col4, col5 = st.columns(2)
         with col4:
-            detail_width_mm = st.text_input(
-                "Detaili laius mm",
-                value=st.session_state.detail_width_mm,
-                placeholder="Nt 95",
-            )
+            detail_width_mm = st.text_input("Detaili laius mm", value=st.session_state.detail_width_mm, placeholder="Nt 95")
         with col5:
-            detail_length_mm = st.text_input(
-                "Detaili pikkus mm",
-                value=st.session_state.detail_length_mm,
-                placeholder="Nt 300",
-            )
+            detail_length_mm = st.text_input("Detaili pikkus mm", value=st.session_state.detail_length_mm, placeholder="Nt 300")
 
-        detail_count = st.text_input(
-            "Detailide arv",
-            value=st.session_state.detail_count,
-            placeholder="Nt 20",
-        )
+        detail_count = st.text_input("Detailide arv", value=st.session_state.detail_count, placeholder="Nt 20")
 
         trim_edges = st.checkbox(
             "Arvesta ääretrimmi / väliste eralduslõigetega",
@@ -921,7 +905,7 @@ with tab_calc:
                     "non_usable_offcut_m2": best_result["non_usable_offcut_area_m2"],
                 }
             )
-            st.success("Töö salvestatud ajalukku.")
+            st.success("Töö logi salvestati automaatselt ajalukku.")
 
         st.success(
             f"Soovitus: {best_result['blade']['blade']} | avatud plaate {best_result['opened_sheet_count']} tk | "
