@@ -20,8 +20,8 @@ LARGE_BLADE = {
 }
 
 SMALL_BLADE = {
-    "blade": "3.5 mm",
-    "kerf_mm": 3.5,
+    "blade": "3.2 mm",
+    "kerf_mm": 3.2,
     "max_stack_mm": 30.0,
     "is_default": False,
 }
@@ -789,7 +789,7 @@ if results and best_result:
     with st.expander("Arvestuse loogika"):
         st.write("- Detail arvutatakse läbi kahes orientatsioonis: sisestatud asendis ja pööratult.")
         st.write("- Iga ketta puhul valitakse kõigepealt parem orientatsioon.")
-        st.write("- Seejärel võrreldakse 5.6 mm ja 3.5 mm ketta parimaid variante.")
+        st.write("- Seejärel võrreldakse 5.6 mm ja 3.2 mm ketta parimaid variante.")
         st.write("- Detailid + saetee = detailide netopind + saetera lõikejälje pind.")
         st.write("- Avatud plaatide pind näitab, kui palju plaate tuleb tööks avada.")
         st.write("- Teoreetiline jääk = avatud plaatide pind - detailid - saetee.")
