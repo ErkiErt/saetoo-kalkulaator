@@ -18,6 +18,7 @@ BASE_HANDLING_PER_SHEET_SEC = 90
 HANDLING_PER_M2_SEC = 45
 RIP_HANDLING_PER_CUT_SEC = 20
 PARTIAL_SHEET_EXTRA_SEC = 60
+THIN_MATERIAL_HANDLING_FACTOR = 0.33
 
 LARGE_BLADE = {
     "blade": "5.6 mm",
@@ -237,7 +238,16 @@ def validate_common(
     return None
 
 
-def build_partial_layout_options(partial_piece_count, max_across, max_along, piece_w, piece_l, kerf_mm, raw_width_mm, raw_length_mm):
+def build_partial_layout_options(
+    partial_piece_count,
+    max_across,
+    max_along,
+    piece_w,
+    piece_l,
+    kerf_mm,
+    raw_width_mm,
+    raw_length_mm,
+):
     options = []
 
     for cols in range(1, min(max_across, partial_piece_count) + 1):
@@ -256,9 +266,6 @@ def build_partial_layout_options(partial_piece_count, max_across, max_along, pie
         theoretical_offcut = max(0.0, area_m2(raw_width_mm, raw_length_mm) - area_m2(used_w, used_l))
         non_usable = max(0.0, theoretical_offcut - usable_area)
 
-        rip_cut_count = cols
-        cross_cut_count = cols * rows
-
         options.append(
             {
                 "cols": cols,
@@ -268,8 +275,6 @@ def build_partial_layout_options(partial_piece_count, max_across, max_along, pie
                 "usable_offcut_area_m2": usable_area,
                 "non_usable_offcut_area_m2": non_usable,
                 "offcuts": offcuts,
-                "rip_cut_count": rip_cut_count,
-                "cross_cut_count": cross_cut_count,
             }
         )
 
@@ -281,7 +286,6 @@ def build_partial_layout_options(partial_piece_count, max_across, max_along, pie
             -x["usable_offcut_area_m2"],
             x["non_usable_offcut_area_m2"],
             x["used_width_mm"] * x["used_length_mm"],
-            x["rip_cut_count"] + x["cross_cut_count"],
         )
     )
     return options[0]
@@ -370,11 +374,11 @@ def build_orientation_result(
         partial_offcuts = partial_layout["offcuts"]
 
         if trim_edges:
-            rip_cut_count_partial = partial_layout["cols"]
-            cross_cut_count_partial = partial_layout["cols"] * partial_layout["rows"]
+            rip_cut_count_partial = partial_cols
+            cross_cut_count_partial = partial_cols * partial_rows
         else:
-            rip_cut_count_partial = max(0, partial_layout["cols"] - 1)
-            cross_cut_count_partial = partial_layout["cols"] * max(0, partial_layout["rows"] - 1)
+            rip_cut_count_partial = max(0, partial_cols - 1)
+            cross_cut_count_partial = partial_cols * max(0, partial_rows - 1)
 
         rip_kerf_area_partial_mm2 = rip_cut_count_partial * raw_length_mm * kerf_mm
         cross_kerf_area_partial_mm2 = cross_cut_count_partial * detail_width_mm * kerf_mm
@@ -436,11 +440,13 @@ def build_orientation_result(
     setup_sec = BASE_SETUP_SEC + blade_switch_setup_sec(blade)
 
     handling_per_sheet_sec = BASE_HANDLING_PER_SHEET_SEC + sheet_area_m2 * HANDLING_PER_M2_SEC
+    handling_factor = THIN_MATERIAL_HANDLING_FACTOR if thickness_mm < 10 else 1.0
+
     handling_sec = (
         opened_sheet_count * handling_per_sheet_sec
         + rip_cut_count * RIP_HANDLING_PER_CUT_SEC
         + (PARTIAL_SHEET_EXTRA_SEC if partial_pattern_count > 0 else 0)
-    )
+    ) * handling_factor
 
     total_sec = cutting_time_sec + setup_sec + handling_sec
 
@@ -486,6 +492,7 @@ def build_orientation_result(
         "setup_sec": setup_sec,
         "handling_sec": handling_sec,
         "handling_per_sheet_sec": handling_per_sheet_sec,
+        "handling_factor": handling_factor,
         "total_sec": total_sec,
         "scheme_used_width_mm": scheme_used_width_mm,
         "scheme_used_length_mm": scheme_used_length_mm,
@@ -707,6 +714,7 @@ def render_result_card(result, best_blade_name):
         ["Setup aeg", sec_to_minsec(result["setup_sec"])],
         ["Käsitsemisaeg", sec_to_minsec(result["handling_sec"])],
         ["Käsitsemisaeg / plaat", sec_to_minsec(result["handling_per_sheet_sec"])],
+        ["Õhukese materjali kordaja", f"{result['handling_factor']:.2f}x"],
     ]
 
     st.table(rows)
@@ -903,8 +911,8 @@ if results and best_result:
         st.write("- Viimane osaline plaat optimeeritakse erinevate veeru-rea kombinatsioonide vahel, et saada parem jääk.")
         st.write("- Ääretrimmi saab vajadusel sisse või välja lülitada.")
         st.write("- Käsitsemisaeg sõltub nii plaatide arvust kui ka plaadi pindalast.")
+        st.write("- Alla 10 mm materjalil kasutatakse käsitsemisaja kordajat 0.33x.")
         st.write("- Koguaeg = lõikeaeg + setup aeg + käsitsemisaeg.")
         st.write("- Käsitsemisaeg arvestab avatud plaatide käsitlemist, ribade eest ära pakkimist ja viimase osalise plaadi lisatööd.")
-
 else:
     st.info("Sisesta andmed ja vajuta Arvuta.")
