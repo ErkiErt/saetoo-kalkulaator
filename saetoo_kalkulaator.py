@@ -38,12 +38,12 @@ COLOR_DETAIL = "#b7d7ff"
 COLOR_DETAIL_EDGE = "#1f4e79"
 
 DEFAULTS = {
-    "thickness_mm": 0,
-    "raw_width_mm": 0.0,
-    "raw_length_mm": 0.0,
-    "detail_length_mm": 0.0,
-    "detail_width_mm": 0.0,
-    "detail_count": 0,
+    "thickness_mm": 20,
+    "raw_width_mm": 1.0,
+    "raw_length_mm": 1.0,
+    "detail_length_mm": 1.0,
+    "detail_width_mm": 1.0,
+    "detail_count": 1,
     "last_results": None,
     "best_result": None,
 }
