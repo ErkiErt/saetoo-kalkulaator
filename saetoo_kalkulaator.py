@@ -39,11 +39,11 @@ COLOR_DETAIL_EDGE = "#1f4e79"
 
 DEFAULTS = {
     "thickness_mm": 20,
-    "raw_width_mm": 1.0,
-    "raw_length_mm": 1.0,
-    "detail_length_mm": 1.0,
-    "detail_width_mm": 1.0,
-    "detail_count": 1,
+    "raw_width_mm": "",
+    "raw_length_mm": "",
+    "detail_length_mm": "",
+    "detail_width_mm": "",
+    "detail_count": "",
     "last_results": None,
     "best_result": None,
 }
@@ -658,7 +658,7 @@ st.caption(
     "Talasae loogika: detailid + saetee on eraldi, avatud plaadid ja kasutatav jääk on eraldi."
 )
 
-with st.form("calc_form"):
+with st.form("calc_form", enter_to_submit=False):
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -673,57 +673,60 @@ with st.form("calc_form"):
         )
 
     with col2:
-        raw_width_mm = st.number_input(
+        raw_width_mm = st.text_input(
             "Tooriku laius mm",
-            min_value=1.0,
-            max_value=MAX_WIDTH_MM,
-            value=float(st.session_state.raw_width_mm),
-            step=1.0,
+            value=st.session_state.raw_width_mm,
+            placeholder="Nt 1000",
         )
 
     with col3:
-        raw_length_mm = st.number_input(
+        raw_length_mm = st.text_input(
             "Tooriku pikkus mm",
-            min_value=1.0,
-            max_value=MAX_LENGTH_MM,
-            value=float(st.session_state.raw_length_mm),
-            step=1.0,
+            value=st.session_state.raw_length_mm,
+            placeholder="Nt 2000",
         )
 
     col4, col5 = st.columns(2)
 
     with col4:
-        detail_width_mm = st.number_input(
+        detail_width_mm = st.text_input(
             "Detaili laius mm",
-            min_value=1.0,
-            value=float(st.session_state.detail_width_mm),
-            step=1.0,
+            value=st.session_state.detail_width_mm,
+            placeholder="Nt 95",
         )
 
     with col5:
-        detail_length_mm = st.number_input(
+        detail_length_mm = st.text_input(
             "Detaili pikkus mm",
-            min_value=1.0,
-            value=float(st.session_state.detail_length_mm),
-            step=1.0,
+            value=st.session_state.detail_length_mm,
+            placeholder="Nt 300",
         )
 
-    detail_count = st.number_input(
+    detail_count = st.text_input(
         "Detailide arv",
-        min_value=1,
-        value=int(st.session_state.detail_count),
-        step=1,
+        value=st.session_state.detail_count,
+        placeholder="Nt 20",
     )
 
     submitted = st.form_submit_button("Arvuta", use_container_width=True)
 
 if submitted:
+    try:
+        raw_width_mm = float(str(raw_width_mm).replace(",", ".").strip())
+        raw_length_mm = float(str(raw_length_mm).replace(",", ".").strip())
+        detail_width_mm = float(str(detail_width_mm).replace(",", ".").strip())
+        detail_length_mm = float(str(detail_length_mm).replace(",", ".").strip())
+        detail_count = int(str(detail_count).strip())
+    except ValueError:
+        st.error("Palun sisesta kõik väljad korrektselt numbritena.")
+        st.stop()
+
     st.session_state.thickness_mm = int(thickness_mm)
-    st.session_state.raw_width_mm = raw_width_mm
-    st.session_state.raw_length_mm = raw_length_mm
-    st.session_state.detail_width_mm = detail_width_mm
-    st.session_state.detail_length_mm = detail_length_mm
-    st.session_state.detail_count = int(detail_count)
+    st.session_state.raw_width_mm = str(raw_width_mm)
+    st.session_state.raw_length_mm = str(raw_length_mm)
+    st.session_state.detail_width_mm = str(detail_width_mm)
+    st.session_state.detail_length_mm = str(detail_length_mm)
+    st.session_state.detail_count = str(detail_count)
 
     error = validate_common(
         int(thickness_mm),
