@@ -20,7 +20,6 @@ try:
 except Exception:
     SKLEARN_AVAILABLE = False
 
-
 st.set_page_config(page_title="Saetöö kalkulaator", page_icon="🪚", layout="wide")
 
 DATA_DIR = Path("data")
@@ -47,8 +46,8 @@ ML_MIN_ROWS_TO_DECIDE = 50
 ML_MAX_ACCEPTABLE_MAE_SEC = 15 * 60
 
 LARGE_BLADE = {
-    "blade": "5.5 mm",
-    "kerf_mm": 5.5,
+    "blade": "5.6 mm",
+    "kerf_mm": 5.6,
     "max_stack_mm": 80.0,
     "is_default": True,
 }
@@ -78,9 +77,9 @@ DEFAULTS = {
     "detail_length_mm": "",
     "detail_width_mm": "",
     "detail_count": "",
-    "hourly_rate_eur": "60",
-    "material_price_m2_eur": "25",
     "trim_edges": True,
+    "hourly_rate_eur": "60",
+    "material_price_m2_eur": "48",
     "order_id": "",
     "operator": "",
     "material": "",
@@ -102,39 +101,31 @@ for key, value in DEFAULTS.items():
 
 
 def clear_calc_inputs():
-    reset_values = {
-        "thickness_mm": 20,
-        "raw_width_mm": "",
-        "raw_length_mm": "",
-        "detail_length_mm": "",
-        "detail_width_mm": "",
-        "detail_count": "",
-        "hourly_rate_eur": "60",
-        "material_price_m2_eur": "25",
-        "trim_edges": True,
-        "last_results": None,
-        "best_result": None,
-        "pending_save_row": None,
-    }
-    for key, value in reset_values.items():
-        st.session_state[key] = value
+    st.session_state.thickness_mm = 20
+    st.session_state.raw_width_mm = ""
+    st.session_state.raw_length_mm = ""
+    st.session_state.detail_length_mm = ""
+    st.session_state.detail_width_mm = ""
+    st.session_state.detail_count = ""
+    st.session_state.trim_edges = True
+    st.session_state.hourly_rate_eur = "60"
+    st.session_state.material_price_m2_eur = "48"
+    st.session_state.last_results = None
+    st.session_state.best_result = None
+    st.session_state.pending_save_row = None
 
 
 def clear_worklog_inputs():
-    reset_values = {
-        "order_id": "",
-        "operator": "",
-        "material": "",
-        "machine_id": "",
-        "shift": "",
-        "actual_time_min": "",
-        "was_scrap": False,
-        "scrap_reason": "",
-        "rework_time_min": "",
-        "pending_save_row": None,
-    }
-    for key, value in reset_values.items():
-        st.session_state[key] = value
+    st.session_state.order_id = ""
+    st.session_state.operator = ""
+    st.session_state.material = ""
+    st.session_state.machine_id = ""
+    st.session_state.shift = ""
+    st.session_state.actual_time_min = ""
+    st.session_state.was_scrap = False
+    st.session_state.scrap_reason = ""
+    st.session_state.rework_time_min = ""
+    st.session_state.pending_save_row = None
 
 
 def get_sec_per_meter(thickness_mm):
@@ -159,8 +150,13 @@ def sec_to_minsec(seconds):
     if seconds is None or pd.isna(seconds):
         return "-"
     seconds = max(0.0, float(seconds))
-    minutes = int(seconds // 60)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
     sec = round(seconds % 60, 1)
+    if hours > 0:
+        if sec == 0:
+            return f"{hours} h {minutes} min"
+        return f"{hours} h {minutes} min {sec} sek"
     return f"{minutes} min {sec} sek"
 
 
@@ -174,22 +170,17 @@ def parse_float_text(value):
     return float(str(value).replace(",", ".").strip())
 
 
+def parse_optional_minutes_to_seconds(value):
+    text = str(value).replace(",", ".").strip()
+    if not text:
+        return 0.0
+    return float(text) * 60
+
+
 def area_m2(width_mm, length_mm):
     if width_mm <= 0 or length_mm <= 0:
         return 0.0
     return (width_mm * length_mm) / 1_000_000.0
-
-
-def calc_cost_eur(seconds, hourly_rate_eur):
-    if seconds is None or pd.isna(seconds):
-        return None
-    return max(0.0, float(seconds)) / 3600.0 * float(hourly_rate_eur)
-
-
-def calc_material_cost_eur(area_value_m2, material_price_m2_eur):
-    if area_value_m2 is None or pd.isna(area_value_m2):
-        return None
-    return max(0.0, float(area_value_m2)) * float(material_price_m2_eur)
 
 
 def max_pieces_in_length(total_len_mm, piece_len_mm, kerf_mm):
@@ -211,11 +202,11 @@ def blade_switch_setup_sec(blade):
 def offcut_is_usable(width_mm, length_mm):
     short_side = min(width_mm, length_mm)
     long_side = max(width_mm, length_mm)
-    offcut_area = area_m2(width_mm, length_mm)
+    offcut_area_m2 = area_m2(width_mm, length_mm)
     return (
         short_side >= MIN_USABLE_OFFCUT_WIDTH_MM
         and long_side >= MIN_USABLE_OFFCUT_LENGTH_MM
-        and offcut_area >= MIN_USABLE_OFFCUT_AREA_M2
+        and offcut_area_m2 >= MIN_USABLE_OFFCUT_AREA_M2
     )
 
 
@@ -387,10 +378,7 @@ def build_orientation_result(
         rip_cut_count_full = max(0, across - 1)
         cross_cut_count_full = across * max(0, along - 1)
 
-    kerf_area_full_mm2 = (
-        rip_cut_count_full * raw_length_mm * kerf_mm
-        + cross_cut_count_full * detail_width_mm * kerf_mm
-    )
+    kerf_area_full_mm2 = rip_cut_count_full * raw_length_mm * kerf_mm + cross_cut_count_full * detail_width_mm * kerf_mm
     net_detail_area_full_mm2 = pieces_per_sheet * detail_width_mm * detail_length_mm
 
     partial_used_width_mm = 0.0
@@ -439,7 +427,6 @@ def build_orientation_result(
         full_pattern_count * net_detail_area_full_mm2
         + partial_piece_count * detail_width_mm * detail_length_mm
     ) / 1_000_000.0
-
     kerf_area_m2 = (full_pattern_count * kerf_area_full_mm2 + kerf_area_partial_mm2) / 1_000_000.0
     consumed_area_m2 = net_detail_area_m2 + kerf_area_m2
 
@@ -488,7 +475,7 @@ def build_orientation_result(
     total_sec = cutting_time_sec + setup_sec + handling_sec
     warning = "Hoiatus: alla 20 mm ribade puhul võivad masina käpad segada." if detail_width_mm < 20 else None
 
-    result = {
+    return {
         "blade": blade,
         "rotated": rotated,
         "trim_edges": trim_edges,
@@ -535,29 +522,14 @@ def build_orientation_result(
         "warning": warning,
         "ml_predicted_actual_time_sec": None,
     }
-    return result
-
-
-def enrich_result_with_costs(result, hourly_rate_eur, material_price_m2_eur):
-    if result is None:
-        return None
-    result["hourly_rate_eur"] = hourly_rate_eur
-    result["material_price_m2_eur"] = material_price_m2_eur
-    result["estimated_work_cost_eur"] = calc_cost_eur(result["total_sec"], hourly_rate_eur)
-    result["ml_estimated_work_cost_eur"] = calc_cost_eur(result.get("ml_predicted_actual_time_sec"), hourly_rate_eur)
-    result["material_billable_area_m2"] = result["consumed_area_m2"] + result["non_usable_offcut_area_m2"]
-    result["material_cost_eur"] = calc_material_cost_eur(result["material_billable_area_m2"], material_price_m2_eur)
-    result["total_estimated_cost_eur"] = (result.get("estimated_work_cost_eur") or 0.0) + (result.get("material_cost_eur") or 0.0)
-    result["ml_total_estimated_cost_eur"] = (
-        (result.get("ml_estimated_work_cost_eur") or 0.0) + (result.get("material_cost_eur") or 0.0)
-        if result.get("ml_estimated_work_cost_eur") is not None
-        else None
-    )
-    return result
 
 
 def result_sort_key(result):
+    total_cost = result.get("total_estimated_cost_eur")
+    if total_cost is None or pd.isna(total_cost):
+        total_cost = float("inf")
     return (
+        total_cost,
         result["opened_sheet_count"],
         result["consumed_area_m2"],
         -result["usable_offcut_area_m2"],
@@ -569,16 +541,20 @@ def result_sort_key(result):
 
 
 def result_sort_key_ml(result):
+    total_cost = result.get("total_estimated_cost_eur")
+    if total_cost is None or pd.isna(total_cost):
+        total_cost = float("inf")
     predicted_time = result.get("ml_predicted_actual_time_sec")
     if predicted_time is None or pd.isna(predicted_time):
         predicted_time = result["total_sec"]
 
     return (
+        total_cost,
+        predicted_time,
         result["opened_sheet_count"],
         result["consumed_area_m2"],
         -result["usable_offcut_area_m2"],
         result["non_usable_offcut_area_m2"],
-        predicted_time,
         result["total_cut_count"],
         0 if result["blade"]["is_default"] else 1,
     )
@@ -645,10 +621,11 @@ def add_blade_reasons(results, best):
             ml_text = f", ML prognoos {sec_to_minsec(r['ml_predicted_actual_time_sec'])}"
 
         r["blade_reason"] = (
-            f"{prefix}: {orientation_text}, {trim_text}, avatud plaate {r['opened_sheet_count']} tk, "
-            f"detailide pind + saetee kadu {r['consumed_area_m2']:.2f} m², "
+            f"{prefix}: {r['blade']['blade']} ketas, {orientation_text}, {trim_text}, "
+            f"avatud plaate {r['opened_sheet_count']} tk, "
+            f"täielik maksumus {r.get('total_estimated_cost_eur', 0):.2f} €, "
+            f"arvestatav materjalipind {r.get('material_billable_area_m2', r['consumed_area_m2'] + r['non_usable_offcut_area_m2']):.2f} m², "
             f"kasutatav jääk {r['usable_offcut_area_m2']:.2f} m², "
-            f"mittearvestatav jääk {r['non_usable_offcut_area_m2']:.2f} m², "
             f"lõikeid kokku {r['total_cut_count']}{ml_text}."
         )
 
@@ -826,13 +803,17 @@ def train_ml_model_cached(csv_path, mtime):
     mae = None
     if len(data) >= 50:
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.25, random_state=42
+            X,
+            y,
+            test_size=0.25,
+            random_state=42,
         )
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
         mae = float(mean_absolute_error(y_test, preds))
 
     model.fit(X, y)
+
     return model, available_numeric + available_categorical, mae, len(data)
 
 
@@ -883,78 +864,133 @@ def predict_result_time(model, feature_cols, result, thickness_mm):
     return float(model.predict(X)[0])
 
 
+def enrich_result_costs(result, hourly_rate_eur, material_price_m2_eur):
+    result["hourly_rate_eur"] = float(hourly_rate_eur)
+    result["material_price_m2_eur"] = float(material_price_m2_eur)
+    result["estimated_work_cost_eur"] = (result["total_sec"] / 3600.0) * float(hourly_rate_eur)
+    result["material_billable_area_m2"] = result["consumed_area_m2"] + result["non_usable_offcut_area_m2"]
+    result["material_cost_eur"] = result["material_billable_area_m2"] * float(material_price_m2_eur)
+    result["total_estimated_cost_eur"] = result["estimated_work_cost_eur"] + result["material_cost_eur"]
+    return result
+
+
 def render_result_card(result, best_blade_name):
     if result is None:
         st.error("Selle kettaga detail ei mahu või ketta max paksus ei luba.")
         return
 
-    st.success("Soovitatud variant" if result["blade"]["blade"] == best_blade_name else "Alternatiiv")
-    st.subheader(result["blade"]["blade"])
+    is_best = result["blade"]["blade"] == best_blade_name
+    total_cost = result.get("total_estimated_cost_eur")
+    total_time = result.get("ml_predicted_actual_time_sec")
+    if total_time is None or pd.isna(total_time):
+        total_time = result["total_sec"]
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Avatud plaate", f"{result['opened_sheet_count']} tk")
-    c2.metric("Valemi aeg", sec_to_minsec(result["total_sec"]))
-    c3.metric("Täielik maksumus", f"{result.get('total_estimated_cost_eur', 0):.2f} €")
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric("Täielik maksumus", f"{total_cost:.2f} €" if total_cost is not None else "-")
+    top2.metric("Koguaeg", sec_to_minsec(total_time))
+    top3.metric("Avatud plaate", f"{result['opened_sheet_count']} tk")
+    top4.metric("Detailid", f"{result['detail_count']} tk")
 
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Töö maksumus", f"{result.get('estimated_work_cost_eur', 0):.2f} €")
-    c5.metric("Materjalikulu", f"{result.get('material_cost_eur', 0):.2f} €")
-    c6.metric(
-        "ML kogumaksumus",
-        f"{result['ml_total_estimated_cost_eur']:.2f} €" if result.get("ml_total_estimated_cost_eur") is not None else "-",
+    if is_best:
+        st.success("✅ Soovitus")
+    else:
+        st.info("Alternatiiv")
+
+    st.markdown(
+        f"{result['blade']['blade']} ketas, "
+        f"{'pööratud' if result['rotated'] else 'pööramata'} detailiga, "
+        f"{'ääretrimmi arvestusega' if result['trim_edges'] else 'ilma ääretrimmi arvestuseta'}."
     )
 
-    st.caption(result["blade_reason"])
+    material_area = result.get("material_billable_area_m2", result["consumed_area_m2"] + result["non_usable_offcut_area_m2"])
+    usable_offcut = result.get("usable_offcut_area_m2", 0.0)
 
-    rows = [
+    if usable_offcut > 0:
+        st.caption(
+            f"Arvestatav materjalipind {material_area:.2f} m². "
+            f"Kasutatavat jääki tekib {usable_offcut:.2f} m²."
+        )
+    else:
+        st.caption(
+            f"Arvestatav materjalipind {material_area:.2f} m². "
+            f"Kasutatavat jääki ei teki."
+        )
+
+    if result.get("warning"):
+        st.warning(result["warning"])
+
+    st.markdown("### Detail ja paigutus")
+    detail_rows = [
         ["Sisestatud detail", f"{fmt(result['input_detail_width_mm'])} x {fmt(result['input_detail_length_mm'])} mm"],
         ["Arvutuses kasutatud detail", f"{fmt(result['detail_width_mm'])} x {fmt(result['detail_length_mm'])} mm"],
         ["Pööratud", "Jah" if result["rotated"] else "Ei"],
-        ["Ääretrimmi arvestus", "Jah" if result["trim_edges"] else "Ei"],
         ["Ühest plaadist", f"{result['pieces_per_sheet']} detaili"],
         ["Laiuses", f"{result['across']} tk"],
         ["Pikkuses", f"{result['along']} tk"],
         ["Täismustriga plaate", f"{result['full_pattern_count']} tk"],
         ["Osalisi plaate", f"{result['partial_pattern_count']} tk"],
-        ["Viimasel osalisel plaadil", f"{result['partial_piece_count']} detaili"],
-        ["Osalise plaadi paigutus", f"{result['partial_cols']} veergu x {result['partial_rows']} rida" if result["partial_piece_count"] > 0 else "-"],
-        ["Detailide netopind", f"{result['net_detail_area_m2']:.2f} m²"],
-        ["Saetee kadu", f"{result['kerf_area_m2']:.2f} m²"],
-        ["Teoreetiline jääk", f"{result['theoretical_offcut_area_m2']:.2f} m²"],
-        ["Mittearvestatav jääk", f"{result['non_usable_offcut_area_m2']:.2f} m²"],
-        ["Tunnihind", f"{result.get('hourly_rate_eur', 0):.2f} €/h"],
-        ["Materjali ruuduhind", f"{result.get('material_price_m2_eur', 0):.2f} €/m²"],
-        ["Arvestatav materjalipind", f"{result.get('material_billable_area_m2', 0):.2f} m²"],
-        ["Töö maksumus", f"{result.get('estimated_work_cost_eur', 0):.2f} €"],
-        ["Materjalikulu", f"{result.get('material_cost_eur', 0):.2f} €"],
-        ["Täielik maksumus", f"{result.get('total_estimated_cost_eur', 0):.2f} €"],
-        ["Suurim kasutatav jääk", offcut_label(result["largest_usable_offcut"])],
-        ["Ribilõikeid", f"{result['rip_cut_count']}"],
-        ["Ristlõikeid", f"{result['cross_cut_count']}"],
-        ["Lõikeid kokku", f"{result['total_cut_count']}"],
-        ["Lõikeaeg", sec_to_minsec(result["cutting_time_sec"])],
-        ["Setup aeg", sec_to_minsec(result["setup_sec"])],
-        ["Käsitsemisaeg", sec_to_minsec(result["handling_sec"])],
     ]
 
-    st.table(rows)
+    if result["partial_piece_count"] > 0:
+        detail_rows.extend(
+            [
+                ["Viimasel osalisel plaadil", f"{result['partial_piece_count']} detaili"],
+                ["Osalise plaadi paigutus", f"{result['partial_cols']} veergu x {result['partial_rows']} rida"],
+            ]
+        )
+
+    st.table(detail_rows)
 
     fig = draw_scheme(result)
     st.pyplot(fig)
     plt.close(fig)
 
-    if result.get("warning"):
-        st.warning(result["warning"])
+    st.markdown("### Maksumus")
+    cost_rows = [
+        ["Tunnihind", f"{result.get('hourly_rate_eur', 0):.2f} €/h"],
+        ["Materjali ruuduhind", f"{result.get('material_price_m2_eur', 0):.2f} €/m²"],
+        ["Arvestatav materjalipind", f"{material_area:.2f} m²"],
+        ["Töö maksumus", f"{result.get('estimated_work_cost_eur', 0):.2f} €"],
+        ["Materjali maksumus", f"{result.get('material_cost_eur', 0):.2f} €"],
+        ["Täielik maksumus", f"{result.get('total_estimated_cost_eur', 0):.2f} €"],
+    ]
+    st.table(cost_rows)
 
-    with st.expander("Jäägid selle variandi puhul"):
+    with st.expander("▼ Materjal ja jääk", expanded=False):
+        material_rows = [
+            ["Detailide netopind", f"{result['net_detail_area_m2']:.2f} m²"],
+            ["Saetee kadu", f"{result['kerf_area_m2']:.2f} m²"],
+            ["Teoreetiline jääk", f"{result['theoretical_offcut_area_m2']:.2f} m²"],
+            ["Mittearvestatav jääk", f"{result['non_usable_offcut_area_m2']:.2f} m²"],
+            ["Kasutatav jääk", f"{result['usable_offcut_area_m2']:.2f} m²"],
+            ["Suurim kasutatav jääk", offcut_label(result["largest_usable_offcut"])],
+        ]
+        st.table(material_rows)
+
         if result["full_offcuts"]:
             st.write("Täismustriga plaadi jäägid:")
             for offcut in result["full_offcuts"]:
                 st.write(f"- {offcut_label(offcut)}")
+
         if result["partial_offcuts"]:
             st.write("Osalise viimase plaadi jäägid:")
             for offcut in result["partial_offcuts"]:
                 st.write(f"- {offcut_label(offcut)}")
+
+    with st.expander("▼ Lõiked ja aeg", expanded=False):
+        time_rows = [
+            ["Ääretrimmi arvestus", "Jah" if result["trim_edges"] else "Ei"],
+            ["Lõikeid kokku", f"{result['total_cut_count']}"],
+            ["Lõikeaeg", sec_to_minsec(result["cutting_time_sec"])],
+            ["Setup aeg", sec_to_minsec(result["setup_sec"])],
+            ["Käsitsemisaeg", sec_to_minsec(result["handling_sec"])],
+            ["Koguaeg", sec_to_minsec(total_time)],
+        ]
+
+        if result.get("ml_predicted_actual_time_sec") is not None:
+            time_rows.append(["ML prognoos", sec_to_minsec(result["ml_predicted_actual_time_sec"])])
+
+        st.table(time_rows)
 
 
 def build_pending_save_row(best_result, actual_time_sec_num, rework_time_sec_num):
@@ -988,20 +1024,18 @@ def build_pending_save_row(best_result, actual_time_sec_num, rework_time_sec_num
         "kerf_mm": best_result["kerf_mm"],
         "estimated_time_sec": best_result["total_sec"],
         "actual_time_sec": actual_time_sec_num,
-        "hourly_rate_eur": best_result.get("hourly_rate_eur"),
-        "material_price_m2_eur": best_result.get("material_price_m2_eur"),
-        "estimated_work_cost_eur": best_result.get("estimated_work_cost_eur"),
-        "ml_estimated_work_cost_eur": best_result.get("ml_estimated_work_cost_eur"),
-        "material_billable_area_m2": best_result.get("material_billable_area_m2"),
-        "material_cost_eur": best_result.get("material_cost_eur"),
-        "total_estimated_cost_eur": best_result.get("total_estimated_cost_eur"),
-        "ml_total_estimated_cost_eur": best_result.get("ml_total_estimated_cost_eur"),
         "usable_offcut_m2": best_result["usable_offcut_area_m2"],
         "non_usable_offcut_m2": best_result["non_usable_offcut_area_m2"],
         "was_scrap": int(st.session_state.was_scrap),
         "scrap_reason": st.session_state.scrap_reason,
         "rework_time_sec": rework_time_sec_num,
         "ml_predicted_actual_time_sec": best_result.get("ml_predicted_actual_time_sec"),
+        "hourly_rate_eur": best_result.get("hourly_rate_eur"),
+        "material_price_m2_eur": best_result.get("material_price_m2_eur"),
+        "estimated_work_cost_eur": best_result.get("estimated_work_cost_eur"),
+        "material_billable_area_m2": best_result.get("material_billable_area_m2"),
+        "material_cost_eur": best_result.get("material_cost_eur"),
+        "total_estimated_cost_eur": best_result.get("total_estimated_cost_eur"),
     }
 
 
@@ -1122,38 +1156,32 @@ with tab_ml:
 with tab_calc:
     with st.form("calc_form", enter_to_submit=False):
         col1, col2, col3 = st.columns(3)
-
         with col1:
             thickness_mm = st.selectbox(
                 "Paksus mm",
                 THICKNESS_OPTIONS_MM,
                 index=THICKNESS_OPTIONS_MM.index(int(st.session_state.thickness_mm)),
             )
-
         with col2:
             raw_width_mm = st.text_input("Tooriku laius mm", value=st.session_state.raw_width_mm, placeholder="Nt 1000")
-
         with col3:
             raw_length_mm = st.text_input("Tooriku pikkus mm", value=st.session_state.raw_length_mm, placeholder="Nt 2000")
 
         col4, col5 = st.columns(2)
-
         with col4:
             detail_width_mm = st.text_input("Detaili laius mm", value=st.session_state.detail_width_mm, placeholder="Nt 95")
-
         with col5:
             detail_length_mm = st.text_input("Detaili pikkus mm", value=st.session_state.detail_length_mm, placeholder="Nt 300")
 
-        detail_count = st.text_input("Detailide arv", value=st.session_state.detail_count, placeholder="Nt 20")
-
-        price1, price2 = st.columns(2)
-        with price1:
+        col6, col7, col8 = st.columns(3)
+        with col6:
+            detail_count = st.text_input("Detailide arv", value=st.session_state.detail_count, placeholder="Nt 20")
+        with col7:
             hourly_rate_eur = st.text_input("Tunnihind €/h", value=st.session_state.hourly_rate_eur, placeholder="Nt 60")
-        with price2:
-            material_price_m2_eur = st.text_input("Materjali ruuduhind €/m²", value=st.session_state.material_price_m2_eur, placeholder="Nt 25")
+        with col8:
+            material_price_m2_eur = st.text_input("Materjali ruuduhind €/m²", value=st.session_state.material_price_m2_eur, placeholder="Nt 48")
 
         trim_edges = st.checkbox("Arvesta ääretrimmi / väliste eralduslõigetega", value=st.session_state.trim_edges)
-
         submitted = st.form_submit_button("Arvuta", use_container_width=True)
 
     if not submitted and not st.session_state.pending_save_row:
@@ -1212,15 +1240,14 @@ with tab_calc:
 
         model, feature_cols, mae, n_rows = get_trained_model()
 
+        for i, r in enumerate(results):
+            if r is not None:
+                results[i] = enrich_result_costs(r, hourly_rate_eur, material_price_m2_eur)
+
         if model is not None:
             for r in results:
                 if r is not None:
-                    r["ml_predicted_actual_time_sec"] = predict_result_time(
-                        model, feature_cols, r, thickness_mm
-                    )
-
-        for r in results:
-            enrich_result_with_costs(r, hourly_rate_eur, material_price_m2_eur)
+                    r["ml_predicted_actual_time_sec"] = predict_result_time(model, feature_cols, r, thickness_mm)
 
         ml_can_decide = (
             model is not None
@@ -1245,12 +1272,8 @@ with tab_calc:
 
         st.success(
             f"{decision_mode}: {best_result['blade']['blade']} | avatud plaate {best_result['opened_sheet_count']} tk | "
-            f"valemi aeg {sec_to_minsec(best_result['total_sec'])}"
-            + (
-                f" | ML aeg {sec_to_minsec(best_result['ml_predicted_actual_time_sec'])}"
-                if best_result.get("ml_predicted_actual_time_sec") is not None
-                else ""
-            )
+            f"täielik maksumus {best_result.get('total_estimated_cost_eur', 0):.2f} € | "
+            f"koguaeg {sec_to_minsec(best_result.get('ml_predicted_actual_time_sec') if best_result.get('ml_predicted_actual_time_sec') is not None else best_result['total_sec'])}"
         )
 
         if model is not None:
@@ -1299,10 +1322,11 @@ with tab_calc:
         st.write("- Mõlemale kettale arvutatakse parim orientatsioon.")
         st.write("- Kui ML mudel on piisavalt treenitud ja vea tase on mõistlik, kasutatakse valikul ML prognoosi.")
         st.write("- Kui ML pole veel usaldusväärne, kasutatakse reeglipõhist valikut.")
+        st.write("- Täielik maksumus = töö maksumus + materjali maksumus.")
+        st.write("- Arvestatav materjalipind = detailide pind + saetee kadu + mittearvestatav jääk.")
         st.write("- Tegelik töö salvestatakse alles käsitsi nupuga, et vältida topeltsalvestust.")
         st.write("- Tegelik aeg sisestatakse minutites, aga ajalukku salvestatakse sekundites.")
         st.write("- Kasutatav jääk peab olema vähemalt 150 mm kitsamast küljest ja 1000 mm pikemast küljest ning vähemalt 0.15 m².")
-        st.write("- Materjalikulu arvestus kasutab pinda: detailide pind + saetee kadu + mittearvestatav jääk.")
 
     if st.session_state.pending_save_row is not None:
         st.subheader("Tehtud töö salvestus")
