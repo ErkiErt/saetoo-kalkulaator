@@ -27,7 +27,7 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 HISTORY_FILE = DATA_DIR / "saetoo_ajalugu.csv"
 
-APP_VERSION = "2026-04-27-v1"
+APP_VERSION = "2026-04-28-holzma-v1"
 
 MAX_LENGTH_MM = 3050.0
 MAX_WIDTH_MM = 2050.0
@@ -44,16 +44,20 @@ RIP_HANDLING_PER_CUT_SEC = 20
 PARTIAL_SHEET_EXTRA_SEC = 60
 THIN_MATERIAL_HANDLING_FACTOR = 0.33
 
+# Holzma talasae loogika:
+# tööliikumine arvutatakse sec/m normiga;
+# tagasisõit on kiirem ja lisatakse eraldi faktorina.
+CUT_RETURN_FACTOR = 0.20
+
 ML_MIN_ROWS_TO_TRAIN = 30
 ML_MIN_ROWS_TO_DECIDE = 50
 ML_MAX_ACCEPTABLE_MAE_SEC = 15 * 60
+ML_MIN_FACTOR = 0.4
+ML_MAX_FACTOR = 2.5
 
 MIN_SMALL_BLADE_COST_SAVING_EUR = 5.0
 MIN_SMALL_BLADE_TIME_SAVING_SEC = 10 * 60
 MIN_SMALL_BLADE_USABLE_OFFCUT_GAIN_M2 = 0.15
-
-ML_MIN_FACTOR = 0.4
-ML_MAX_FACTOR = 2.5
 
 LARGE_BLADE = {
     "blade": "5.6 mm",
@@ -524,33 +528,34 @@ def build_orientation_result(
 
     total_cut_count = longitudinal_cut_count + cross_cut_count
 
-    longitudinal_time_sec = (
+    longitudinal_forward_time_sec = (
         full_sheet_count
         * (raw_length_mm / 1000.0)
         * sec_per_m
-        * 2
         * longitudinal_cut_count_full
         + partial_sheet_count
         * (raw_length_mm / 1000.0)
         * sec_per_m
-        * 2
         * longitudinal_cut_count_partial
     )
 
-    cross_time_sec = (
+    cross_forward_time_sec = (
         full_sheet_count
         * (full_used_width_mm / 1000.0)
         * sec_per_m
-        * 2
         * cross_cut_count_full
         + partial_sheet_count
         * (partial_used_width_mm / 1000.0)
         * sec_per_m
-        * 2
         * cross_cut_count_partial
     )
 
-    cutting_time_sec = longitudinal_time_sec + cross_time_sec
+    forward_cutting_time_sec = longitudinal_forward_time_sec + cross_forward_time_sec
+    return_travel_time_sec = forward_cutting_time_sec * CUT_RETURN_FACTOR
+    cutting_time_sec = forward_cutting_time_sec + return_travel_time_sec
+
+    longitudinal_time_sec = longitudinal_forward_time_sec
+    cross_time_sec = cross_forward_time_sec
 
     setup_sec = BASE_SETUP_SEC + blade_switch_setup_sec(blade)
     handling_per_sheet_sec = BASE_HANDLING_PER_SHEET_SEC + sheet_area_m2 * HANDLING_PER_M2_SEC
@@ -618,6 +623,10 @@ def build_orientation_result(
         "longitudinal_cut_count": longitudinal_cut_count,
         "cross_cut_count": cross_cut_count,
         "total_cut_count": total_cut_count,
+        "longitudinal_time_sec": longitudinal_time_sec,
+        "cross_time_sec": cross_time_sec,
+        "forward_cutting_time_sec": forward_cutting_time_sec,
+        "return_travel_time_sec": return_travel_time_sec,
         "cutting_time_sec": cutting_time_sec,
         "setup_sec": setup_sec,
         "handling_sec": handling_sec,
@@ -747,15 +756,19 @@ def build_best_result_for_blade(
         trim_edges,
     )
 
+    if normal is not None:
+        normal["rotated"] = False
+        normal["input_detail_width_mm"] = detail_width_mm
+        normal["input_detail_length_mm"] = detail_length_mm
+        normal["detail_width_mm"] = detail_width_mm
+        normal["detail_length_mm"] = detail_length_mm
+
     if rotated is not None:
         rotated["rotated"] = True
         rotated["input_detail_width_mm"] = detail_width_mm
         rotated["input_detail_length_mm"] = detail_length_mm
         rotated["detail_width_mm"] = detail_length_mm
         rotated["detail_length_mm"] = detail_width_mm
-
-    if normal is not None:
-        normal["rotated"] = False
 
     return choose_best_orientation_result([normal, rotated])
 
@@ -1135,7 +1148,11 @@ def render_result_card(result, best_blade_name):
         ["Pikilõikeid", f"{result['longitudinal_cut_count']}"],
         ["Ristlõikeid", f"{result['cross_cut_count']}"],
         ["Lõikeid kokku", f"{result['total_cut_count']}"],
-        ["Lõikeaeg", sec_to_minsec(result["cutting_time_sec"])],
+        ["Pikilõike tööaeg", sec_to_minsec(result.get("longitudinal_time_sec"))],
+        ["Ristlõike tööaeg", sec_to_minsec(result.get("cross_time_sec"))],
+        ["Lõikav tööliikumine kokku", sec_to_minsec(result.get("forward_cutting_time_sec"))],
+        ["Tagasisõidu lisa", sec_to_minsec(result.get("return_travel_time_sec"))],
+        ["Lõikeaeg kokku", sec_to_minsec(result["cutting_time_sec"])],
         ["Setup aeg", sec_to_minsec(result["setup_sec"])],
         ["Käsitsemisaeg", sec_to_minsec(result["handling_sec"])],
         ["Materjalikulu pind", f"{result['material_billable_area_m2']:.2f} m²"],
@@ -1213,7 +1230,7 @@ def build_pending_save_row(best_result, actual_time_sec_num, rework_time_sec_num
 
 
 st.title("🪚 Saetöö kalkulaator")
-st.caption("Arvutus + töölogi + ajalugu + ML. Ajalukku salvestamine toimub käsitsi pärast arvutust.")
+st.caption("Arvutus + töölogi + ajalugu + ML. Holzma talasae loogika: tagasisõit on kiirem kui lõikesõit.")
 
 top1, top2 = st.columns([5, 1])
 
@@ -1573,6 +1590,10 @@ with tab_calc:
         st.write("- Lõiked jagunevad kaheks: pikilõiked ja ristlõiked.")
         st.write("- Kui detail on juba tooriku täispikkune, siis ristlõiget ei arvestata.")
         st.write("- Täisplaatide ja osalise plaadi lõikeaeg arvutatakse eraldi.")
+        st.write(
+            f"- Holzma loogika: tagasisõit ei ole sama aeglane kui lõikesõit; "
+            f"tagasisõidu lisa on {int(CUT_RETURN_FACTOR * 100)}% lõikavast tööliikumisest."
+        )
         st.write("- 3.1 mm ketas valitakse ainult siis, kui ta annab piisava tootmisliku võidu.")
         st.write(
             f"- 3.1 mm valiku lävend: vähemalt {MIN_SMALL_BLADE_COST_SAVING_EUR:.2f} € säästu, "
